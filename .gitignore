@@ -1,0 +1,7 @@
+.archive/
+datasets/
+detections/
+**/*__pycache__/
+debug/
+eval/
+.vscode/
