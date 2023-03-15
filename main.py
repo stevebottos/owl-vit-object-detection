@@ -1,151 +1,118 @@
 import os
-import json
 
-import torch
 import cv2
-from torchvision.ops import box_convert, nms
-import numpy as np
+import torch
 from tqdm import tqdm
 from pycocotools.cocoeval import COCOeval
-from torch.nn.functional import softmax
 
-from util import scale_bounding_box, draw_box_on_image
+from util import BoxUtil, AverageMeter
 from data.dataset import get_dataloaders
-from models import OwlViT, FocalBoxLoss
+from models import OwlViT, FocalBoxLoss, PostProcess
 
-N_EPOCHS = 30
-CONFIDENCE_THRESHOLD = 0.75
-IOU_THRESHOLD = 0.3
+
+def coco_to_model_input(boxes, metadata):
+    boxes = BoxUtil.box_convert(boxes, "xywh", "xyxy")
+    boxes = BoxUtil.scale_bounding_box(
+        boxes, metadata["width"], metadata["height"], mode="down"
+    )
+
+    return boxes
+
+
+def model_output_to_image(boxes, metadata):
+    # Model outputs in xyxy normalized coordinates, so scale up
+    # before overlaying on image
+    boxes = BoxUtil.scale_bounding_box(
+        boxes, metadata["width"], metadata["height"], mode="up"
+    )
+
+    return boxes
+
+
+def reverse_labelmap(labelmap):
+    return {
+        v["new_idx"]: {"actual_category": k, "name": v["name"]}
+        for k, v in labelmap.items()
+    }
+
+
+def invalid_batch(boxes):
+    # Some images don't have box annotations. Just skip these
+    return boxes.size(1) == 0
+
 
 if __name__ == "__main__":
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    n_epochs = 5
+
     (
         train_dataloader,
         test_dataloader,
         labelmap,
         test_gts,
-    ) = get_dataloaders(
-        train_images=2500,
-    )
+    ) = get_dataloaders(train_images=1000, test_images=1000)
+    classmap = reverse_labelmap(labelmap)
 
-    # Reverse the labelmal for eval
-    # reverse_labelmap = {
-    #     v["new_idx"]: {"actual_category": k, "name": v["name"]}
-    #     for k, v in labelmap.items()
-    # }
-
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    postprocess = PostProcess(confidence_threshold=0.05)
     model = OwlViT(num_classes=len(labelmap)).to(device)
     criterion = FocalBoxLoss(device=device)
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
 
     model.train()
-    for epoch in range(N_EPOCHS):
+    for epoch in range(n_epochs):
         os.makedirs(f"debug/{epoch}", exist_ok=True)
-        box_losses = []
-        cls_losses = []
+        t_cls_loss = []
+        t_box_loss = []
+        cls_loss = AverageMeter()
+        box_loss = AverageMeter()
         for i, (image, labels, boxes, metadata) in enumerate(
             tqdm(train_dataloader, ncols=60)
         ):
-            # Some images don't have box annotations. Just skip these
-            if boxes.size(1) == 0:
+            if invalid_batch(boxes):
                 continue
 
-            image_cv2 = cv2.imread(metadata["impath"].pop())
             model.zero_grad()
 
             # Prep inputs
             image = image.to(device)
             labels = labels.to(device)
+            boxes = coco_to_model_input(boxes, metadata).to(device)
 
-            # coco format is this
-            boxes = box_convert(boxes, "xywh", "xyxy")
-            boxes = scale_bounding_box(
-                boxes, metadata["width"], metadata["height"], mode="down"
-            ).to(device)
+            # Predict
+            all_pred_boxes, pred_classes = model(image)
 
-            pred_boxes, pred_classes = model(image)
-
-            # Predict classes
-            box_loss, cls_loss, _pred_boxes = criterion(
-                pred_boxes, pred_classes, boxes, labels
+            _box_loss, _cls_loss, _ = criterion(
+                all_pred_boxes, pred_classes, boxes, labels
             )
 
-            loss = box_loss + cls_loss
+            loss = _box_loss + _cls_loss
             loss.backward()
             optimizer.step()
-            box_losses.append(box_loss.item())
-            cls_losses.append(cls_loss.item())
 
-            # _pred_boxes = scale_bounding_box(
-            #     _pred_boxes, metadata["width"], metadata["height"], mode="up"
-            # )
+            box_loss.update(_box_loss)
+            cls_loss.update(_cls_loss)
 
-            # for box in _pred_boxes[0].tolist():
-            #     image_cv2 = draw_box_on_image(image_cv2, box)
-            # cv2.imwrite(f"debug/{epoch}/{i}.jpg", image_cv2)
-
-        if len(box_losses):
-            print(round(np.mean(box_losses), 3), "\t", round(np.mean(cls_losses), 3))
+        print(box_loss.get_value(), "\t", cls_loss.get_value())
+        box_loss.reset()
+        cls_loss.reset()
 
     model.eval()
     with torch.no_grad():
         for i, (image, labels, boxes, metadata) in enumerate(
             tqdm(test_dataloader, ncols=60)
         ):
-            if i == 1000:
-                break
-
-            image_cv2 = cv2.imread(metadata["impath"].pop())
-
-            # Some images don't have box annotations
-            if boxes.size(1) == 0:
+            if invalid_batch(boxes):
                 continue
 
             # Prep inputs
             image = image.to(device)
             labels = labels.to(device)
+            boxes = coco_to_model_input(boxes, metadata).to(device)
 
-            # coco format to xyxy
-            boxes = box_convert(boxes, "xywh", "xyxy")
-            boxes = scale_bounding_box(
-                boxes, metadata["width"], metadata["height"], mode="down"
-            ).to(device)
-
-            pred_boxes, pred_classes = model(image)
-
-            # Just support batch size of one for now
-            pred_boxes = pred_boxes.squeeze(0)
-            pred_classes = pred_classes.squeeze(0)
-            # Get the top scores and apply nms
-            scores = softmax(pred_classes, dim=-1)[:, 1:]
-            top = torch.max(scores, dim=1)
-            scores = top.values
-            classes = top.indices
-
-            idx = scores > CONFIDENCE_THRESHOLD
-
-            scores = scores[idx]
-            classes = classes[idx]
-            pred_boxes = pred_boxes[idx]
-
-            # NMS
-            idx = nms(pred_boxes, scores, iou_threshold=IOU_THRESHOLD)
-            classes += 1  # We got rid of background, so increment classes by 1
-            classes = classes[idx]
-            pred_boxes = pred_boxes[idx]
-            scores = scores[idx]
-
-            pred_boxes = scale_bounding_box(
-                pred_boxes.unsqueeze(0).to("cpu"),
-                metadata["width"],
-                metadata["height"],
-                mode="up",
+            # Get predictions and save output
+            pred_boxes = postprocess(*model(image)).cpu()
+            pred_boxes = model_output_to_image(pred_boxes, metadata)
+            image_with_boxes = BoxUtil.draw_box_on_image(
+                metadata["impath"].pop(), pred_boxes
             )
-
-            classes = classes.tolist()
-            pred_boxes = pred_boxes.tolist()
-            scores = scores.tolist()
-
-            for box in pred_boxes.pop():
-                image_cv2 = draw_box_on_image(image_cv2, box)
-            cv2.imwrite(f"eval/{i}.jpg", image_cv2)
+            cv2.imwrite(f"eval/{i}.jpg", image_with_boxes)

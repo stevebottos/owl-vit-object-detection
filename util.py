@@ -1,85 +1,74 @@
 # from PIL import Image
 
 import torch
+from torchvision.ops import box_convert as _box_convert
 import cv2
-
-# import numpy as np
-# import cv2
+import numpy as np
 
 
-def scale_bounding_box(bbox: torch.tensor, imwidth: int, imheight: int, mode: str):
-    # scale = torch.tensor([imwidth, imheight, imwidth, imheight])
-    if mode == "down":
-        bbox[:, :, (0, 2)] /= imwidth
-        bbox[:, :, (1, 3)] /= imheight
-        return bbox
-    elif mode == "up":
-        bbox[:, :, (0, 2)] *= imwidth
-        bbox[:, :, (1, 3)] *= imheight
-        return bbox
+class AverageMeter:
+    def __init__(self):
+        self.value = torch.tensor(0).float().cpu()
+        self.n = 0
+
+    def update(self, val):
+        self.value += val.detach().cpu()
+        self.n += 1
+
+    def get_value(self):
+        return (self.value / self.n).item()
+
+    def reset(self):
+        self.value = 0
 
 
-# def stamp_image(image, colormap):
-#     # White out area for the info
-#     image[0:250, 0:310] = (0, 0, 0)
-#     _y = 30
-#     colormap.update({"ground truth": (100, 100, 100)})
-#     for label, color in colormap.items():
-#         cv2.putText(
-#             img=image,
-#             text=label,
-#             org=(10, _y),
-#             fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-#             fontScale=1,
-#             color=color,
-#             thickness=3,
-#         )
-#         _y += 40
-#     return image
+class BoxUtil:
+    @classmethod
+    def scale_bounding_box(
+        cls,
+        boxes_batch: torch.tensor,  # [M, N, 4, 4]
+        imwidth: int,
+        imheight: int,
+        mode: str,  # up | down
+    ):
+        if mode == "down":
+            boxes_batch[:, :, (0, 2)] /= imwidth
+            boxes_batch[:, :, (1, 3)] /= imheight
+            return boxes_batch
+        elif mode == "up":
+            boxes_batch[:, :, (0, 2)] *= imwidth
+            boxes_batch[:, :, (1, 3)] *= imheight
+            return boxes_batch
 
+    @classmethod
+    def draw_box_on_image(
+        cls,
+        image: str or np.ndarray,  # cv2 image
+        boxes_batch: torch.tensor,
+        color=(0, 255, 0),
+    ):
+        if isinstance(image, str):
+            image = cv2.imread(image)
 
-def draw_box_on_image(image, box, color=(0, 255, 0)):
-    image = cv2.rectangle(
-        image,
-        [int(box[0]), int(box[1])],
-        [int(box[2]), int(box[3])],
-        color,
-        2,
-    )
-    return image
+        boxes_batch = boxes_batch.detach().cpu().numpy()
+        for single in boxes_batch:
+            for box in single:
+                print(box)
+                image = cv2.rectangle(
+                    image,
+                    [int(box[0]), int(box[1])],
+                    [int(box[2]), int(box[3])],
+                    color,
+                    2,
+                )
+        return image
 
-
-# def scale_box(box, w, h, mode):
-#     if mode == "down":
-#         return np.array(box) / [w, h, w, h]
-#     elif mode == "up":
-#         return np.array(box) * [w, h, w, h]
-
-
-# def load_sample(image, data, labelmap, processor):
-#     w, h = image.size
-#     image = processor(images=image, return_tensors="pt")["pixel_values"]
-
-#     _labels = []
-#     _boxes = []
-#     for label, boxes in data["boxes"].items():
-
-#         if not len(boxes):
-#             continue
-#         for b in boxes:
-#             _labels.append(labelmap[label])
-#             _boxes.append(scale_box(b, w, h, mode="down"))
-
-#     return {
-#         "image": image,
-#         "labels": torch.tensor(_labels),
-#         "boxes": torch.tensor(_boxes).float(),
-#     }
-
-
-# def prepare_samples(samples, labelmap, processor):
-#     inputs = []
-#     for impath, data in samples.items():
-#         image = Image.open(impath)
-#         inputs.append(load_sample(image, data, labelmap, processor))
-#     return inputs
+    # see https://pytorch.org/vision/main/generated/torchvision.ops.box_convert.html
+    @classmethod
+    def box_convert(
+        cls,
+        boxes_batch: torch.tensor,  # [M, N, 4, 4]
+        in_format: str,  # [‘xyxy’, ‘xywh’, ‘cxcywh’]
+        out_format: str,  # [‘xyxy’, ‘xywh’, ‘cxcywh’]
+    ):
+        return _box_convert(boxes_batch, in_format, out_format)
