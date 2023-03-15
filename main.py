@@ -92,9 +92,6 @@ if __name__ == "__main__":
             box_loss.update(_box_loss)
             cls_loss.update(_cls_loss)
 
-            t_box_loss.append(box_loss.item())
-            t_class_loss.append(box_loss.item())
-
         print(box_loss.get_value(), "\t", cls_loss.get_value())
         box_loss.reset()
         cls_loss.reset()
