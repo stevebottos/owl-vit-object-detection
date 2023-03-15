@@ -4,6 +4,72 @@ from transformers import OwlViTForObjectDetection
 from transformers.image_transforms import center_to_corners_format
 from torchvision.ops import box_iou
 import numpy as np
+from torchvision.ops import sigmoid_focal_loss
+from torch.nn.functional import softmax
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class FocalBoxLoss(torch.nn.Module):
+    def __init__(self, device, post_reduction_bg_scale=1.25):
+        super().__init__()
+        self.scale = post_reduction_bg_scale
+        self.device = device
+        self.smoothl1 = torch.nn.SmoothL1Loss(reduction="sum")
+
+    def forward(self, pred_boxes, pred_classes, boxes, labels):
+        pred_boxes = pred_boxes.to(self.device)
+        pred_classes = pred_classes.to(self.device)
+        boxes = boxes.to(self.device)
+        labels = labels.to(self.device).float()
+        batch_size = pred_boxes.size(0)
+
+        # Index for each batch
+        box_loss = torch.tensor(0.0)
+        class_loss = torch.tensor(0.0).to(self.device)
+        _pred_boxes = []
+        for i in range(batch_size):
+            _labels = labels[i]
+            _boxes = boxes[i]
+            _pred_classes = pred_classes[i].to(self.device)
+
+            # Matching
+            ious = 1 - box_iou(pred_boxes[i], _boxes)
+            lsa, idx = linear_sum_assignment(ious.cpu().detach().numpy())
+
+            # Box loss
+            iou_error = (ious[lsa, idx]).sum()
+            box_loss = self.smoothl1(pred_boxes[i][lsa], _boxes[idx]) + iou_error
+            _pred_boxes.append(pred_boxes[i][lsa].tolist())
+
+            batch_gts = torch.zeros(len(_pred_classes)).to(self.device)
+            batch_gts[lsa] = _labels[idx]
+            batch_gts = batch_gts.long()
+
+            # Class loss
+            pos_ind = batch_gts != 0
+            neg_ind = batch_gts == 0
+            reduction = pos_ind.sum() / neg_ind.sum()
+
+            # For focal
+            n_classes = _pred_classes.shape[-1]
+            batch_gts_one_hot = torch.nn.functional.one_hot(
+                batch_gts, num_classes=n_classes
+            ).float()
+
+            _class_loss = sigmoid_focal_loss(
+                _pred_classes, batch_gts_one_hot, reduction="none"
+            )
+
+            # Reduce the impact of the background
+            _class_loss[neg_ind] *= reduction * 1.25
+
+            class_loss += _class_loss.sum()
+
+        box_loss /= batch_size
+        class_loss /= batch_size
+        # print(class_loss.item())
+        return box_loss, class_loss, torch.tensor(_pred_boxes)
 
 
 class OwlViT(torch.nn.Module):
@@ -21,10 +87,11 @@ class OwlViT(torch.nn.Module):
         self.layernorm = model.layer_norm
         self.post_layernorm = model.owlvit.vision_model.post_layernorm
 
-        # Freeze backbone (except layernorms)
-        for name, parameter in self.backbone.named_parameters():
-            if "layernorm" not in name:
-                parameter.requires_grad = False
+        for parameter in self.backbone.parameters():
+            parameter.requires_grad = False
+
+        for parameter in self.post_layernorm.parameters():
+            parameter.requires_grad = False
 
         self.box_head = model.box_head
         self.compute_box_bias = model.compute_box_bias
@@ -91,56 +158,5 @@ class OwlViT(torch.nn.Module):
 
         # New class head that works off image_feats instead of feature_map
         pred_classes = self.cls_head(image_feats)
+
         return pred_boxes, pred_classes
-
-
-class ScaledLoss(torch.nn.Module):
-    def __init__(self, class_scales, device, scale_factor=5, cap=250):
-        super().__init__()
-        self.device = device
-        # Class counts don't include the background class (0),
-        # which will be set to 1 (no scale)
-        max_class = max(class_scales)
-        class_scales = [
-            min((max_class / count) * scale_factor, cap) for count in class_scales
-        ]
-        class_scales.insert(0, 1)  # Don't scale background class
-        # print(class_scales)
-        class_weights = torch.tensor(class_scales, dtype=torch.float).to(self.device)
-        self.smoothl1 = torch.nn.SmoothL1Loss(reduction="sum")
-        self.cls_loss = torch.nn.CrossEntropyLoss(weight=class_weights)
-
-    def forward(self, pred_boxes, pred_classes, boxes, labels):
-        pred_boxes = pred_boxes.to(self.device)
-        pred_classes = pred_classes.to(self.device)
-        boxes = boxes.to(self.device)
-        labels = labels.to(self.device).float()
-        batch_size = pred_boxes.size(0)
-
-        # Index for each batch
-        box_loss = torch.tensor(0.0)
-        class_loss = torch.tensor(0.0).to(self.device)
-        _pred_boxes = []
-        for i in range(batch_size):
-            _labels = labels[i]
-            _boxes = boxes[i]
-            _pred_classes = pred_classes[i].to(self.device)
-
-            # Matching
-            ious = 1 - box_iou(pred_boxes[i], _boxes)
-            lsa, idx = linear_sum_assignment(ious.cpu().detach().numpy())
-
-            # Box loss
-            iou_error = (ious[lsa, idx]).sum()
-            box_loss = self.smoothl1(pred_boxes[i][lsa], _boxes[idx]) + iou_error
-            _pred_boxes.append(pred_boxes[i][lsa].tolist())
-
-            # Class loss
-            batch_gts = torch.zeros(len(_pred_classes)).to(self.device)
-            batch_gts[lsa] = _labels[idx]
-            batch_gts = batch_gts.long()
-            class_loss += self.cls_loss(_pred_classes, batch_gts)
-
-        box_loss /= batch_size
-        class_loss /= batch_size
-        return box_loss, class_loss, torch.tensor(_pred_boxes)

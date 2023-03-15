@@ -72,9 +72,7 @@ class CocoSubset(Dataset):
         return image, torch.tensor(labels), torch.tensor(boxes), metadata
 
 
-def get_dataloaders():
-    train_images = 5000
-
+def get_dataloaders(train_images):
     image_processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch32")
     dataset = CocoSubset(image_processor)
 
@@ -100,4 +98,4 @@ def get_dataloaders():
     test_dataloader = DataLoader(
         test_subset, batch_size=1, shuffle=False, num_workers=1
     )
-    return train_dataloader, test_dataloader, labelcounts, labelmap, dataset.coco
+    return train_dataloader, test_dataloader, labelmap, dataset.coco

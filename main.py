@@ -11,9 +11,9 @@ from torch.nn.functional import softmax
 
 from util import scale_bounding_box, draw_box_on_image
 from data.dataset import get_dataloaders
-from models import OwlViT, ScaledLoss
+from models import OwlViT, FocalBoxLoss
 
-N_EPOCHS = 10
+N_EPOCHS = 30
 CONFIDENCE_THRESHOLD = 0.75
 IOU_THRESHOLD = 0.3
 
@@ -22,22 +22,21 @@ if __name__ == "__main__":
     (
         train_dataloader,
         test_dataloader,
-        labelcounts,
         labelmap,
         test_gts,
-    ) = get_dataloaders()
+    ) = get_dataloaders(
+        train_images=2500,
+    )
 
-    # Reverse the labelmal
-    reverse_labelmap = {
-        v["new_idx"]: {"actual_category": k, "name": v["name"]}
-        for k, v in labelmap.items()
-    }
-
-    labelcounts = [labelcounts[i] for i in sorted(labelcounts)]
+    # Reverse the labelmal for eval
+    # reverse_labelmap = {
+    #     v["new_idx"]: {"actual_category": k, "name": v["name"]}
+    #     for k, v in labelmap.items()
+    # }
 
     model = OwlViT(num_classes=len(labelmap)).to(device)
-    criterion = ScaledLoss(class_scales=labelcounts, device=device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0003)
+    criterion = FocalBoxLoss(device=device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
 
     model.train()
     for epoch in range(N_EPOCHS):
