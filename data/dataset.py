@@ -72,12 +72,14 @@ class CocoSubset(Dataset):
         return image, torch.tensor(labels), torch.tensor(boxes), metadata
 
 
-def get_dataloaders(train_images):
+def get_dataloaders(train_images, test_images=None):
     image_processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch32")
     dataset = CocoSubset(image_processor)
 
     train_indices = list(range(train_images))
     test_indices = list(range(train_images, len(dataset)))
+    if test_images is not None:
+        test_indices = test_indices[:test_images]
 
     print(
         f"Using indices {min(train_indices)} to {max(train_indices)} as train, indices {min(test_indices)} to {max(test_indices)} as test"

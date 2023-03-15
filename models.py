@@ -1,13 +1,10 @@
 from scipy.optimize import linear_sum_assignment
 import torch
+from torch.nn.functional import softmax
 from transformers import OwlViTForObjectDetection
 from transformers.image_transforms import center_to_corners_format
-from torchvision.ops import box_iou
+from torchvision.ops import box_iou, sigmoid_focal_loss, nms
 import numpy as np
-from torchvision.ops import sigmoid_focal_loss
-from torch.nn.functional import softmax
-import torch.nn as nn
-import torch.nn.functional as F
 
 
 class FocalBoxLoss(torch.nn.Module):
@@ -18,41 +15,32 @@ class FocalBoxLoss(torch.nn.Module):
         self.smoothl1 = torch.nn.SmoothL1Loss(reduction="sum")
 
     def forward(self, pred_boxes, pred_classes, boxes, labels):
-        pred_boxes = pred_boxes.to(self.device)
-        pred_classes = pred_classes.to(self.device)
-        boxes = boxes.to(self.device)
-        labels = labels.to(self.device).float()
         batch_size = pred_boxes.size(0)
-
-        # Index for each batch
-        box_loss = torch.tensor(0.0)
+        box_loss = torch.tensor(0.0).to(self.device)
         class_loss = torch.tensor(0.0).to(self.device)
-        _pred_boxes = []
-        for i in range(batch_size):
-            _labels = labels[i]
-            _boxes = boxes[i]
-            _pred_classes = pred_classes[i].to(self.device)
+        debug_boxes = []
 
+        for (
+            _pred_boxes,
+            _pred_classes,
+            _boxes,
+            _labels,
+        ) in zip(pred_boxes, pred_classes, boxes, labels):
             # Matching
-            ious = 1 - box_iou(pred_boxes[i], _boxes)
-            lsa, idx = linear_sum_assignment(ious.cpu().detach().numpy())
+            ious = 1 - box_iou(_pred_boxes, _boxes)
+            lsa, idx = linear_sum_assignment(ious.detach().cpu().numpy())
 
             # Box loss
             iou_error = (ious[lsa, idx]).sum()
-            box_loss = self.smoothl1(pred_boxes[i][lsa], _boxes[idx]) + iou_error
-            _pred_boxes.append(pred_boxes[i][lsa].tolist())
-
-            batch_gts = torch.zeros(len(_pred_classes)).to(self.device)
-            batch_gts[lsa] = _labels[idx]
-            batch_gts = batch_gts.long()
+            box_loss = self.smoothl1(_pred_boxes[lsa], _boxes[idx]) + iou_error
+            debug_boxes.append(_pred_boxes[lsa].tolist())
 
             # Class loss
-            pos_ind = batch_gts != 0
-            neg_ind = batch_gts == 0
-            reduction = pos_ind.sum() / neg_ind.sum()
+            n_predictions, n_classes = _pred_classes.size()
+            batch_gts = torch.zeros(n_predictions).to(self.device)
+            batch_gts = batch_gts.long()
+            batch_gts[lsa] = _labels[idx]
 
-            # For focal
-            n_classes = _pred_classes.shape[-1]
             batch_gts_one_hot = torch.nn.functional.one_hot(
                 batch_gts, num_classes=n_classes
             ).float()
@@ -62,14 +50,17 @@ class FocalBoxLoss(torch.nn.Module):
             )
 
             # Reduce the impact of the background
-            _class_loss[neg_ind] *= reduction * 1.25
+            pos_ind = batch_gts != 0
+            neg_ind = batch_gts == 0
+            reduction = pos_ind.sum() / neg_ind.sum()
+            _class_loss[neg_ind] *= reduction * self.scale
 
             class_loss += _class_loss.sum()
 
         box_loss /= batch_size
         class_loss /= batch_size
-        # print(class_loss.item())
-        return box_loss, class_loss, torch.tensor(_pred_boxes)
+
+        return box_loss, class_loss, torch.tensor(debug_boxes)
 
 
 class OwlViT(torch.nn.Module):
@@ -160,3 +151,34 @@ class OwlViT(torch.nn.Module):
         pred_classes = self.cls_head(image_feats)
 
         return pred_boxes, pred_classes
+
+
+class PostProcess:
+    def __init__(self, confidence_threshold=0.75, iou_threshold=0.3):
+        self.confidence_threshold = confidence_threshold
+        self.iou_threshold = iou_threshold
+
+    def __call__(self, all_pred_boxes, pred_classes):
+        # Just support batch size of one for now
+        pred_boxes = all_pred_boxes.squeeze(0)
+        pred_classes = pred_classes.squeeze(0)
+
+        scores = softmax(pred_classes, dim=-1)[:, 1:]
+        top = torch.max(scores, dim=1)
+        scores = top.values
+        classes = top.indices
+
+        idx = scores > self.confidence_threshold
+
+        scores = scores[idx]
+        classes = classes[idx]
+        pred_boxes = pred_boxes[idx]
+
+        # NMS
+        idx = nms(pred_boxes, scores, iou_threshold=self.confidence_threshold)
+        classes += 1  # We got rid of background, so increment classes by 1
+        classes = classes[idx]
+        pred_boxes = pred_boxes[idx]
+        scores = scores[idx]
+
+        return pred_boxes.unsqueeze_(0)
