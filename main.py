@@ -1,7 +1,7 @@
 import os
 
-import cv2
 import torch
+from torchvision.io import write_png
 from tqdm import tqdm
 from pycocotools.cocoeval import COCOeval
 
@@ -43,6 +43,7 @@ def invalid_batch(boxes):
 
 if __name__ == "__main__":
     n_epochs = 5
+    save_train_debug_boxes = False
 
     (
         train_dataloader,
@@ -60,11 +61,14 @@ if __name__ == "__main__":
 
     model.train()
     for epoch in range(n_epochs):
-        os.makedirs(f"debug/{epoch}", exist_ok=True)
+        if save_train_debug_boxes:
+            os.makedirs(f"debug/{epoch}", exist_ok=True)
+
         t_cls_loss = []
         t_box_loss = []
         cls_loss = AverageMeter()
         box_loss = AverageMeter()
+
         for i, (image, labels, boxes, metadata) in enumerate(
             tqdm(train_dataloader, ncols=60)
         ):
@@ -81,7 +85,7 @@ if __name__ == "__main__":
             # Predict
             all_pred_boxes, pred_classes = model(image)
 
-            _box_loss, _cls_loss, _ = criterion(
+            _box_loss, _cls_loss, debug = criterion(
                 all_pred_boxes, pred_classes, boxes, labels
             )
 
@@ -91,6 +95,13 @@ if __name__ == "__main__":
 
             box_loss.update(_box_loss)
             cls_loss.update(_cls_loss)
+
+            if save_train_debug_boxes:
+                pred_boxes = model_output_to_image(debug, metadata)
+                image_with_boxes = BoxUtil.draw_box_on_image(
+                    metadata["impath"].pop(), pred_boxes
+                )
+                write_png(image_with_boxes, f"debug/{epoch}/{i}.jpg")
 
         print(box_loss.get_value(), "\t", cls_loss.get_value())
         box_loss.reset()
@@ -111,8 +122,9 @@ if __name__ == "__main__":
 
             # Get predictions and save output
             pred_boxes = postprocess(*model(image)).cpu()
+
             pred_boxes = model_output_to_image(pred_boxes, metadata)
             image_with_boxes = BoxUtil.draw_box_on_image(
                 metadata["impath"].pop(), pred_boxes
             )
-            cv2.imwrite(f"eval/{i}.jpg", image_with_boxes)
+            write_png(image_with_boxes, f"eval/{i}.jpg")

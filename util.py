@@ -1,9 +1,9 @@
 # from PIL import Image
 
 import torch
+from torchvision.io import read_image
 from torchvision.ops import box_convert as _box_convert
-import cv2
-import numpy as np
+from torchvision.utils import draw_bounding_boxes
 
 
 class AverageMeter:
@@ -43,24 +43,15 @@ class BoxUtil:
     @classmethod
     def draw_box_on_image(
         cls,
-        image: str or np.ndarray,  # cv2 image
+        image: str or torch.tensor,  # cv2 image
         boxes_batch: torch.tensor,
         color=(0, 255, 0),
     ):
         if isinstance(image, str):
-            image = cv2.imread(image)
+            image = read_image(image)
 
-        boxes_batch = boxes_batch.detach().cpu().numpy()
         for single in boxes_batch:
-            for box in single:
-                print(box)
-                image = cv2.rectangle(
-                    image,
-                    [int(box[0]), int(box[1])],
-                    [int(box[2]), int(box[3])],
-                    color,
-                    2,
-                )
+            image = draw_bounding_boxes(image, single, width=2)
         return image
 
     # see https://pytorch.org/vision/main/generated/torchvision.ops.box_convert.html
