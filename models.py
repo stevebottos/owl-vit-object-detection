@@ -8,7 +8,7 @@ import numpy as np
 
 
 class FocalBoxLoss(torch.nn.Module):
-    def __init__(self, device, post_reduction_bg_scale=1.25):
+    def __init__(self, device, post_reduction_bg_scale=1.0):
         super().__init__()
         self.scale = post_reduction_bg_scale
         self.device = device
@@ -46,10 +46,16 @@ class FocalBoxLoss(torch.nn.Module):
             ).float()
 
             _class_loss = sigmoid_focal_loss(
-                _pred_classes, batch_gts_one_hot, reduction="none"
+                _pred_classes,
+                batch_gts_one_hot,
+                reduction="none",
+                alpha=0.1,
+                gamma=2,  # default
             )
 
-            # Reduce the impact of the background
+            # Further reduce the impact of the background,
+            # extension of focal loss's alpha param
+            # but weighted on a per-image basis
             pos_ind = batch_gts != 0
             neg_ind = batch_gts == 0
             reduction = pos_ind.sum() / neg_ind.sum()
