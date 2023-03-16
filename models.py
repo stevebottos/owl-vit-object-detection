@@ -8,7 +8,7 @@ import numpy as np
 
 
 class FocalBoxLoss(torch.nn.Module):
-    def __init__(self, device, post_reduction_bg_scale=1.0):
+    def __init__(self, device, post_reduction_bg_scale=1.25):
         super().__init__()
         self.scale = post_reduction_bg_scale
         self.device = device
@@ -49,7 +49,7 @@ class FocalBoxLoss(torch.nn.Module):
                 _pred_classes,
                 batch_gts_one_hot,
                 reduction="none",
-                alpha=0.1,
+                alpha=0.75,
                 gamma=2,  # default
             )
 
@@ -60,6 +60,9 @@ class FocalBoxLoss(torch.nn.Module):
             neg_ind = batch_gts == 0
             reduction = pos_ind.sum() / neg_ind.sum()
             _class_loss[neg_ind] *= reduction * self.scale
+
+            # Amplify the positive classes
+            _class_loss[pos_ind]
 
             class_loss += _class_loss.sum()
 
