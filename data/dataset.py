@@ -14,12 +14,12 @@ class OrderedCounter(Counter, OrderedDict):
 
 
 class CocoSubset(Dataset):
-    def __init__(self, image_processor):
-        annotations_file = "/mnt/e/datasets/coco/annotations/instances_train2014.json"
+    def __init__(self, image_processor, annotations_file):
         self.images_dir = "/mnt/e/datasets/coco/train2014"
 
         self.coco = COCO(annotations_file)
         self.ids = list(sorted(self.coco.imgs.keys()))
+
         self.labelmap = {
             k: {"new_idx": i + 1, "name": v["name"]}
             for i, (k, v) in enumerate(self.coco.cats.items())
@@ -72,32 +72,27 @@ class CocoSubset(Dataset):
         return image, torch.tensor(labels), torch.tensor(boxes), metadata
 
 
-def get_dataloaders(train_images, test_images=None):
+def get_dataloaders(
+    train_annotations_file="/home/steve/repos/owl-vit-object-detection/data/train.json",
+    test_annotations_file="/home/steve/repos/owl-vit-object-detection/data/test.json",
+):
     image_processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch32")
-    dataset = CocoSubset(image_processor)
 
-    train_indices = list(range(train_images))
-    test_indices = list(range(train_images, len(dataset)))
-    if test_images is not None:
-        test_indices = test_indices[:test_images]
+    train_dataset = CocoSubset(image_processor, train_annotations_file)
+    test_dataset = CocoSubset(image_processor, test_annotations_file)
 
-    print(
-        f"Using indices {min(train_indices)} to {max(train_indices)} as train, indices {min(test_indices)} to {max(test_indices)} as test"
-    )
-
-    labelmap = dataset.labelmap
-    train_subset = Subset(dataset, indices=train_indices)
-    test_subset = Subset(dataset, indices=test_indices)
+    print(f"Train dataset: {len(train_dataset)}, test dataset: {len(test_dataset)}")
 
     # For scaling
-    labelcounts = OrderedCounter()
-    for i in range(len(dataset)):
-        labelcounts.update(train_subset.dataset.load_annotation(i))
+    train_labelcounts = OrderedCounter()
+    for i in range(len(train_dataset)):
+        train_labelcounts.update(train_dataset.load_annotation(i))
 
     train_dataloader = DataLoader(
-        train_subset, batch_size=1, shuffle=False, num_workers=1
+        train_dataset, batch_size=1, shuffle=False, num_workers=1
     )
     test_dataloader = DataLoader(
-        test_subset, batch_size=1, shuffle=False, num_workers=1
+        test_dataset, batch_size=1, shuffle=False, num_workers=1
     )
-    return train_dataloader, test_dataloader, labelmap, dataset.coco
+
+    return train_dataloader, test_dataloader

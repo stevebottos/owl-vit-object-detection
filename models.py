@@ -181,4 +181,4 @@ class PostProcess:
         pred_boxes = pred_boxes[idx]
         scores = scores[idx]
 
-        return pred_boxes.unsqueeze_(0)
+        return pred_boxes.unsqueeze_(0), classes.unsqueeze_(0), scores.unsqueeze_(0)

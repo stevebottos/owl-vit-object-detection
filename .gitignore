@@ -5,3 +5,4 @@ detections/
 debug/
 eval/
 .vscode/
+data/*.json
