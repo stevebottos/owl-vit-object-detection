@@ -181,6 +181,14 @@ class FocalBoxLoss(torch.nn.Module):
                 _pred_classes.to(self.device), batch_gts.to(self.device)
             )
 
+            pos_ind = batch_gts != 0
+            pos_loss = _class_loss[pos_ind]
+            _class_loss[batch_gts != 0] = 0
+            neg_loss, _ = torch.sort(_class_loss, descending=True)
+            neg_loss = neg_loss[: pos_ind.sum()]
+
+            print(pos_loss, neg_loss)
+
             # Apply negative/positive
             pos_ind = batch_gts != 0
             neg_ind = batch_gts == 0
