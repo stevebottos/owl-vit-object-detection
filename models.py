@@ -3,7 +3,7 @@ import torch
 from torch.nn.functional import softmax
 from transformers import OwlViTForObjectDetection
 from transformers.image_transforms import center_to_corners_format
-from torchvision.ops import box_area, nms
+from torchvision.ops import box_area, nms, box_iou as _box_iou
 import numpy as np
 import torch.nn as nn
 
@@ -136,7 +136,7 @@ class HungarianMatcher(nn.Module):
 
 
 class FocalBoxLoss(torch.nn.Module):
-    def __init__(self, device, train_labelcouts, scale=3.0):
+    def __init__(self, device, train_labelcouts, scale=2.0):
         super().__init__()
         max_class = max(train_labelcouts)
         scales = [
@@ -169,7 +169,9 @@ class FocalBoxLoss(torch.nn.Module):
             # box loss
             _pred_boxes = pred_boxes[i][pred_i]
             _gt_boxes = boxes[i][gt_i]
-            box_loss += self.smoothl1(_pred_boxes, _gt_boxes)
+
+            iou = 1 - _box_iou(_pred_boxes, _gt_boxes)[:, 0]
+            box_loss += (self.smoothl1(_pred_boxes, _gt_boxes) + iou.mean()) * 10
 
             # class loss
             _pred_classes = pred_classes[i]
@@ -187,7 +189,9 @@ class FocalBoxLoss(torch.nn.Module):
             pos_loss = _class_loss[pos_ind]
             _class_loss[batch_gts != 0] = 0
             neg_loss, _ = torch.sort(_class_loss, descending=True)
-            neg_loss = neg_loss[: pos_ind.sum() * 3]
+            neg_loss = neg_loss[
+                : pos_ind.sum() * 2
+            ]  # Get 3x as much noise as there are positive samples
 
             # # Apply negative/positive
             # pos_ind = batch_gts != 0
@@ -219,11 +223,9 @@ class OwlViT(torch.nn.Module):
         self.layernorm = model.layer_norm
         self.post_layernorm = model.owlvit.vision_model.post_layernorm
 
-        for parameter in self.backbone.parameters():
-            parameter.requires_grad = False
-
-        for parameter in self.post_layernorm.parameters():
-            parameter.requires_grad = False
+        for name, parameter in self.backbone.named_parameters():
+            if "layernorm" not in name:
+                parameter.requires_grad = False
 
         self.box_head = model.box_head
         self.compute_box_bias = model.compute_box_bias

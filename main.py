@@ -43,7 +43,7 @@ def invalid_batch(boxes):
 
 
 if __name__ == "__main__":
-    n_epochs = 10
+    n_epochs = 3
     save_train_debug_boxes = False
 
     train_dataloader, test_dataloader, train_labelcounts = get_dataloaders()
