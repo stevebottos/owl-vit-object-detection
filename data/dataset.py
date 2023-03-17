@@ -95,4 +95,4 @@ def get_dataloaders(
         test_dataset, batch_size=1, shuffle=False, num_workers=1
     )
 
-    return train_dataloader, test_dataloader
+    return train_dataloader, test_dataloader, train_labelcounts

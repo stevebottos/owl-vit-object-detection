@@ -43,19 +43,19 @@ def invalid_batch(boxes):
 
 
 if __name__ == "__main__":
-    n_epochs = 3
+    n_epochs = 10
     save_train_debug_boxes = False
 
-    train_dataloader, test_dataloader = get_dataloaders()
-
+    train_dataloader, test_dataloader, train_labelcounts = get_dataloaders()
+    train_labelcounts = [train_labelcounts[i] for i in sorted(train_labelcounts)]
     labelmap = train_dataloader.dataset.labelmap
     classmap = reverse_labelmap(labelmap)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    postprocess = PostProcess()
     model = OwlViT(num_classes=len(labelmap)).to(device)
-    criterion = FocalBoxLoss(device=device)
+    criterion = FocalBoxLoss(device, train_labelcounts)
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+    postprocess = PostProcess(confidence_threshold=0.95, iou_threshold=0.01)
 
     model.train()
     for epoch in range(n_epochs):
@@ -81,7 +81,7 @@ if __name__ == "__main__":
             # Predict
             all_pred_boxes, pred_classes = model(image)
 
-            _box_loss, _cls_loss, debug = criterion(
+            _box_loss, _cls_loss = criterion(
                 all_pred_boxes, pred_classes, boxes, labels
             )
 

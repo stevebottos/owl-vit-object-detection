@@ -1,5 +1,6 @@
 import json
 import random
+from collections import Counter
 
 source_annotations_file = "/mnt/e/datasets/coco/annotations/instances_train2014.json"
 num_train_samples = 2000
@@ -32,11 +33,21 @@ random.shuffle(valid_indices)
 train_indices = valid_indices[:num_train_samples]
 test_indices = valid_indices[num_train_samples : num_train_samples + num_test_samples]
 
-for a in annotations:
-    if a["image_id"] in train_indices:
-        coco_train["annotations"].append(a)
-    elif a["image_id"] in test_indices:
-        coco_test["annotations"].append(a)
+while True:
+    classes = []
+    for a in annotations:
+        if a["image_id"] in train_indices:
+            coco_train["annotations"].append(a)
+            classes.append(a["category_id"])
+        elif a["image_id"] in test_indices:
+            coco_test["annotations"].append(a)
+            classes.append(a["category_id"])
+    print(json.dumps(Counter(classes), indent=2))
+    accept = input("accept? y/n")
+
+    if accept == "y":
+        break
+
 
 for i in images:
     if i["id"] in train_indices:
