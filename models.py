@@ -136,12 +136,14 @@ class HungarianMatcher(nn.Module):
 
 
 class FocalBoxLoss(torch.nn.Module):
-    def __init__(self, device, train_labelcouts, post_reduction_bg_scale=2.0):
+    def __init__(self, device, train_labelcouts, scale=3.0):
         super().__init__()
         max_class = max(train_labelcouts)
-        scales = [2 - (classcount / max_class) for classcount in train_labelcouts]
+        scales = [
+            (2 - (classcount / max_class)) * scale for classcount in train_labelcouts
+        ]
         scales.insert(0, 1)
-        self.scale = post_reduction_bg_scale
+        self.scale = scale
         self.device = device
         self.matcher = HungarianMatcher()
         self.smoothl1 = torch.nn.SmoothL1Loss(reduction="sum")
@@ -185,19 +187,17 @@ class FocalBoxLoss(torch.nn.Module):
             pos_loss = _class_loss[pos_ind]
             _class_loss[batch_gts != 0] = 0
             neg_loss, _ = torch.sort(_class_loss, descending=True)
-            neg_loss = neg_loss[: pos_ind.sum()]
+            neg_loss = neg_loss[: pos_ind.sum() * 3]
 
-            print(pos_loss, neg_loss)
+            # # Apply negative/positive
+            # pos_ind = batch_gts != 0
+            # neg_ind = batch_gts == 0
 
-            # Apply negative/positive
-            pos_ind = batch_gts != 0
-            neg_ind = batch_gts == 0
+            # reduction = pos_ind.sum() / neg_ind.sum()
+            # _class_loss[neg_ind] *= reduction
+            # _class_loss[pos_ind] *= self.scale
 
-            reduction = pos_ind.sum() / neg_ind.sum()
-            _class_loss[neg_ind] *= reduction
-            _class_loss[pos_ind] *= self.scale
-
-            class_loss += _class_loss.sum()
+            class_loss += (pos_loss.sum() + neg_loss.sum()) / pos_ind.sum()
 
         box_loss /= batch_size
         class_loss /= batch_size

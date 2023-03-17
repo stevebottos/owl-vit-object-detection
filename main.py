@@ -55,7 +55,7 @@ if __name__ == "__main__":
     model = OwlViT(num_classes=len(labelmap)).to(device)
     criterion = FocalBoxLoss(device, train_labelcounts)
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
-    postprocess = PostProcess(confidence_threshold=0.95, iou_threshold=0.01)
+    postprocess = PostProcess()
 
     model.train()
     for epoch in range(n_epochs):
