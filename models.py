@@ -236,11 +236,11 @@ class OwlViT(torch.nn.Module):
 
         self.cls_head = torch.nn.Sequential(
             torch.nn.Linear(width, width),
-            torch.nn.GELU(),
+            torch.nn.Tanh(),
             torch.nn.Linear(width, width),
-            torch.nn.GELU(),
+            torch.nn.Tanh(),
             torch.nn.Linear(width, width),
-            torch.nn.GELU(),
+            torch.nn.Tanh(),
             torch.nn.Linear(width, num_classes),
         )
 
