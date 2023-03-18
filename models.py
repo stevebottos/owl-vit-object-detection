@@ -1,9 +1,11 @@
+from math import log
+
 from scipy.optimize import linear_sum_assignment
 import torch
 from torch.nn.functional import softmax
 from transformers import OwlViTForObjectDetection
 from transformers.image_transforms import center_to_corners_format
-from torchvision.ops import box_area, nms, box_iou as _box_iou
+from torchvision.ops import box_area, nms, complete_box_iou_loss
 import numpy as np
 import torch.nn as nn
 
@@ -136,14 +138,17 @@ class HungarianMatcher(nn.Module):
 
 
 class FocalBoxLoss(torch.nn.Module):
-    def __init__(self, device, train_labelcouts, scale=2.0):
+    def __init__(self, device, train_labelcouts, pos_neg_ratio=5):
         super().__init__()
         max_class = max(train_labelcouts)
         scales = [
-            (2 - (classcount / max_class)) * scale for classcount in train_labelcouts
+            10 * 1 + (log(max_class / classcount)) for classcount in train_labelcouts
         ]
         scales.insert(0, 1)
-        self.scale = scale
+        # print(scales)
+        # print(max(scales))
+        # exit()
+        self.pos_neg_ratio = pos_neg_ratio
         self.device = device
         self.matcher = HungarianMatcher()
         self.smoothl1 = torch.nn.SmoothL1Loss(reduction="sum")
@@ -170,8 +175,9 @@ class FocalBoxLoss(torch.nn.Module):
             _pred_boxes = pred_boxes[i][pred_i]
             _gt_boxes = boxes[i][gt_i]
 
-            iou = 1 - _box_iou(_pred_boxes, _gt_boxes)[:, 0]
-            box_loss += (self.smoothl1(_pred_boxes, _gt_boxes) + iou.mean()) * 10
+            # print(complete_box_iou_loss(_pred_boxes, _gt_boxes, reduction="sum"))
+            # box_loss += self.smoothl1(_pred_boxes, _gt_boxes)
+            box_loss += complete_box_iou_loss(_pred_boxes, _gt_boxes, reduction="sum")
 
             # class loss
             _pred_classes = pred_classes[i]
@@ -189,17 +195,7 @@ class FocalBoxLoss(torch.nn.Module):
             pos_loss = _class_loss[pos_ind]
             _class_loss[batch_gts != 0] = 0
             neg_loss, _ = torch.sort(_class_loss, descending=True)
-            neg_loss = neg_loss[
-                : pos_ind.sum() * 2
-            ]  # Get 3x as much noise as there are positive samples
-
-            # # Apply negative/positive
-            # pos_ind = batch_gts != 0
-            # neg_ind = batch_gts == 0
-
-            # reduction = pos_ind.sum() / neg_ind.sum()
-            # _class_loss[neg_ind] *= reduction
-            # _class_loss[pos_ind] *= self.scale
+            neg_loss = neg_loss[: pos_ind.sum() * self.pos_neg_ratio]
 
             class_loss += (pos_loss.sum() + neg_loss.sum()) / pos_ind.sum()
 
@@ -223,9 +219,15 @@ class OwlViT(torch.nn.Module):
         self.layernorm = model.layer_norm
         self.post_layernorm = model.owlvit.vision_model.post_layernorm
 
-        for name, parameter in self.backbone.named_parameters():
-            if "layernorm" not in name:
-                parameter.requires_grad = False
+        # for name, parameter in self.backbone.named_parameters():
+        #     if "layernorm" not in name:
+        #         parameter.requires_grad = False
+
+        for parameter in self.backbone.parameters():
+            parameter.requires_grad = False
+
+        for parameter in self.post_layernorm.parameters():
+            parameter.requires_grad = False
 
         self.box_head = model.box_head
         self.compute_box_bias = model.compute_box_bias

@@ -43,7 +43,7 @@ def invalid_batch(boxes):
 
 
 if __name__ == "__main__":
-    n_epochs = 3
+    n_epochs = 50
     save_train_debug_boxes = False
 
     train_dataloader, test_dataloader, train_labelcounts = get_dataloaders()
@@ -91,13 +91,6 @@ if __name__ == "__main__":
 
             box_loss.update(_box_loss)
             cls_loss.update(_cls_loss)
-
-            if save_train_debug_boxes:
-                pred_boxes = model_output_to_image(debug, metadata)
-                image_with_boxes = BoxUtil.draw_box_on_image(
-                    metadata["impath"].pop(), None, pred_boxes
-                )
-                write_png(image_with_boxes, f"debug/{epoch}/{i}.jpg")
 
         print(box_loss.get_value(), "\t", cls_loss.get_value())
         box_loss.reset()
