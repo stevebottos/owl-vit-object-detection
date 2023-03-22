@@ -308,7 +308,7 @@ class PostProcess:
         pred_boxes = all_pred_boxes.squeeze(0)
         pred_classes = pred_classes.squeeze(0)
 
-        scores = softmax(pred_classes, dim=-1)[:, 1:]
+        scores = softmax(pred_classes, dim=-1)[:, :-1]
         top = torch.max(scores, dim=1)
         scores = top.values
         classes = top.indices
@@ -320,8 +320,7 @@ class PostProcess:
         pred_boxes = pred_boxes[idx]
 
         # NMS
-        idx = nms(pred_boxes, scores, iou_threshold=self.confidence_threshold)
-        classes += 1  # We got rid of background, so increment classes by 1
+        idx = nms(pred_boxes, scores, iou_threshold=self.iou_threshold)
         classes = classes[idx]
         pred_boxes = pred_boxes[idx]
         scores = scores[idx]
