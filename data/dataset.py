@@ -21,13 +21,9 @@ class CocoSubset(Dataset):
         self.ids = list(sorted(self.coco.imgs.keys()))
 
         self.labelmap = {
-            k: {"new_idx": i + 1, "name": v["name"]}
+            k: {"new_idx": i, "name": v["name"]}
             for i, (k, v) in enumerate(self.coco.cats.items())
         }
-
-        # 0 is reserved for background
-        assert 0 not in self.labelmap.keys()
-        self.labelmap[0] = {"new_idx": 0, "name": "background"}
         self.image_processor = image_processor
 
     def _load_image(self, id: int) -> Image.Image:

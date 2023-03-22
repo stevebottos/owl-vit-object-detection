@@ -1,5 +1,6 @@
 import os
 import json
+import json
 
 import torch
 from torchvision.io import write_png
@@ -9,6 +10,7 @@ from pycocotools.coco import COCO
 from util import BoxUtil, AverageMeter
 from data.dataset import get_dataloaders
 from models import OwlViT, FocalBoxLoss, PostProcess
+from losses import get_criterion
 
 
 def coco_to_model_input(boxes, metadata):
@@ -43,27 +45,27 @@ def invalid_batch(boxes):
 
 
 if __name__ == "__main__":
-    n_epochs = 10
+    n_epochs = 20
     save_train_debug_boxes = False
 
     train_dataloader, test_dataloader, train_labelcounts = get_dataloaders()
-    train_labelcounts = [train_labelcounts[i] for i in sorted(train_labelcounts)]
     labelmap = train_dataloader.dataset.labelmap
     classmap = reverse_labelmap(labelmap)
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = OwlViT(num_classes=len(labelmap)).to(device)
-    criterion = FocalBoxLoss(device, train_labelcounts)
+    model = OwlViT(num_classes=len(labelmap) + 1).to(device)
+    # criterion = FocalBoxLoss(device, train_labelcounts)
+    criterion = get_criterion(num_classes=len(labelmap)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
-    postprocess = PostProcess()
+    postprocess = PostProcess(confidence_threshold=0.95)
 
     model.train()
     for epoch in range(n_epochs):
         if save_train_debug_boxes:
             os.makedirs(f"debug/{epoch}", exist_ok=True)
 
-        cls_loss = AverageMeter()
-        box_loss = AverageMeter()
+        ce_loss = AverageMeter()
+        bbox_loss = AverageMeter()
+        giou_loss = AverageMeter()
 
         for i, (image, labels, boxes, metadata) in enumerate(
             tqdm(train_dataloader, ncols=60)
@@ -81,20 +83,35 @@ if __name__ == "__main__":
             # Predict
             all_pred_boxes, pred_classes = model(image)
 
-            _box_loss, _cls_loss = criterion(
-                all_pred_boxes, pred_classes, boxes, labels
-            )
+            preds = {"pred_logits": pred_classes, "pred_boxes": all_pred_boxes}
+            gts = [
+                {"labels": _labels, "boxes": _boxes}
+                for _boxes, _labels in zip(boxes, labels)
+            ]
 
-            loss = _box_loss + _cls_loss
+            losses = criterion(preds, gts)
+
+            loss = losses["loss_ce"] + losses["loss_bbox"] + losses["loss_giou"]
             loss.backward()
             optimizer.step()
 
-            box_loss.update(_box_loss)
-            cls_loss.update(_cls_loss)
+            ce_loss.update(losses["loss_ce"])
+            bbox_loss.update(losses["loss_bbox"])
+            giou_loss.update(losses["loss_giou"])
 
-        print(box_loss.get_value(), "\t", cls_loss.get_value())
-        box_loss.reset()
-        cls_loss.reset()
+        print(
+            "CE:",
+            ce_loss.get_value(),
+            "\t",
+            "BBOX:",
+            bbox_loss.get_value(),
+            "\t",
+            "GIOU:",
+            giou_loss.get_value(),
+        )
+        ce_loss.reset()
+        bbox_loss.reset()
+        giou_loss.reset()
 
     model.eval()
     os.makedirs("eval/results", exist_ok=True)
