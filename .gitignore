@@ -3,6 +3,7 @@ datasets/
 detections/
 **/*__pycache__/
 debug/
+!debug/.gitkeep
 eval/
 .vscode/
 data/*.json
