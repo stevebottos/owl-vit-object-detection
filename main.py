@@ -122,7 +122,6 @@ if __name__ == "__main__":
         print(*general_loss.get_values().items(), sep="\n")
         general_loss.reset()
 
-        continue
         # Eval loop
         results = []
         model.eval()
