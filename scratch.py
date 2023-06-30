@@ -1,5 +1,5 @@
-import torch
+from pprint import pprint
 
-tens = torch.rand((4))
-print(tens.shape)
-print(tens[0])
+d = {"a": 1, "b": 2, "c": 3}
+
+pprint(*d)

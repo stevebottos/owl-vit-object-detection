@@ -1,20 +1,49 @@
+from collections import defaultdict
+from typing import Dict
+
+import numpy as np
 import torch
+from torch.utils.tensorboard import SummaryWriter
 from torchvision.io import read_image
 from torchvision.ops import box_convert as _box_convert
 from torchvision.utils import draw_bounding_boxes
 
 
-class AverageMeter:
+class TensorboardLossAccumulator:
+    def __init__(self, log_dir):
+        self.class_losses = defaultdict(list)
+        self.writer = SummaryWriter(log_dir)
+
+    def update(self, classes, losses):
+        for cls, loss in zip(classes, losses):
+            self.class_losses[cls].append(loss)
+
+    def write(self, epoch):
+        loss_collector = []
+        for k, v in self.class_losses.items():
+            val = np.mean(v)
+            loss_collector.append(val)
+            self.writer.add_scalar(f"loss/{k}", val, epoch)
+        self.writer.add_scalar("loss/all", np.mean(loss_collector), epoch)
+        self.class_losses = defaultdict(list)
+        self.writer.flush()
+
+
+class GeneralLossAccumulator:
     def __init__(self):
-        self.value = 0
+        self.loss_values = defaultdict(lambda: 0)
         self.n = 0
 
-    def update(self, val):
-        self.value += val
+    def update(self, losses: Dict[str, torch.tensor]):
+        for k, v in losses.items():
+            self.loss_values[k] += v.item()
         self.n += 1
 
-    def get_value(self):
-        return self.value / self.n
+    def get_values(self):
+        averaged = {}
+        for k, v in self.loss_values.items():
+            averaged[k] = v / self.n
+        return averaged
 
     def reset(self):
         self.value = 0

@@ -1,9 +1,8 @@
+**/*__pycache__/
+.vscode/
 .archive/
 datasets/
-detections/
-**/*__pycache__/
 debug/
-!debug/.gitkeep
-eval/
-.vscode/
+logs/
 data/*.json
+scratch.py

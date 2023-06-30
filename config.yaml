@@ -3,3 +3,7 @@ data:
   annotations_file: "/media/steve/Seagate Portable Drive/datasets/coco/annotations/instances_train2014.json"
   num_train_images: 2500  # Keep high enough to ensure that at least one of each label is seen in training. 2500 is a good minimum
   num_test_images: 200
+
+training:
+  n_epochs: 20
+  save_debug_images: true
