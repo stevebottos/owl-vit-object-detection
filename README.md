@@ -31,3 +31,9 @@ Now you're ready to train with
 ```
 python main.py
 ```
+
+During training, for class-level loss plots, run
+```
+tensorboard --logdir=logs
+```
+![image](assets/TensorBoard.png "Tensorboard Screenshot")
