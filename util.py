@@ -1,5 +1,3 @@
-# from PIL import Image
-
 import torch
 from torchvision.io import read_image
 from torchvision.ops import box_convert as _box_convert
@@ -8,15 +6,15 @@ from torchvision.utils import draw_bounding_boxes
 
 class AverageMeter:
     def __init__(self):
-        self.value = torch.tensor(0).float().cpu()
+        self.value = 0
         self.n = 0
 
     def update(self, val):
-        self.value += val.detach().cpu()
+        self.value += val
         self.n += 1
 
     def get_value(self):
-        return (self.value / self.n).item()
+        return self.value / self.n
 
     def reset(self):
         self.value = 0

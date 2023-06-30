@@ -95,9 +95,9 @@ if __name__ == "__main__":
             loss.backward()
             optimizer.step()
 
-            ce_loss.update(losses["loss_ce"])
-            bbox_loss.update(losses["loss_bbox"])
-            giou_loss.update(losses["loss_giou"])
+            ce_loss.update(losses["loss_ce"].item())
+            bbox_loss.update(losses["loss_bbox"].item())
+            giou_loss.update(losses["loss_giou"].item())
 
         print(
             "CE:",

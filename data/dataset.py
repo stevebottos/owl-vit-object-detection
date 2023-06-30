@@ -1,12 +1,23 @@
-from collections import OrderedDict, Counter
-
 import os
+from collections import Counter, OrderedDict
 
 import torch
 from PIL import Image
 from pycocotools.coco import COCO
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset
 from transformers import OwlViTProcessor
+import yaml
+
+
+TRAIN_ANNOTATIONS_FILE = "data/train.json"
+TEST_ANNOTATIONS_FILE = "data/test.json"
+
+
+def get_images_dir():
+    with open("config.yaml", "r") as stream:
+        data = yaml.safe_load(stream)["data"]
+
+        return data["images_path"]
 
 
 class OrderedCounter(Counter, OrderedDict):
@@ -15,7 +26,7 @@ class OrderedCounter(Counter, OrderedDict):
 
 class CocoSubset(Dataset):
     def __init__(self, image_processor, annotations_file):
-        self.images_dir = "/mnt/e/datasets/coco/train2014"
+        self.images_dir = get_images_dir()
 
         self.coco = COCO(annotations_file)
         self.ids = list(sorted(self.coco.imgs.keys()))
@@ -69,8 +80,8 @@ class CocoSubset(Dataset):
 
 
 def get_dataloaders(
-    train_annotations_file="/home/steve/repos/owl-vit-object-detection/data/train.json",
-    test_annotations_file="/home/steve/repos/owl-vit-object-detection/data/test.json",
+    train_annotations_file=TRAIN_ANNOTATIONS_FILE,
+    test_annotations_file=TEST_ANNOTATIONS_FILE,
 ):
     image_processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch32")
 
