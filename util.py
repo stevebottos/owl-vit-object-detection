@@ -72,14 +72,18 @@ class BoxUtil:
         cls,
         image: str or torch.tensor,  # cv2 image
         boxes_batch: torch.tensor,
-        labels_batch: list,
+        labels_batch: list = None,
         color=(0, 255, 0),
     ):
         if isinstance(image, str):
             image = read_image(image)
 
-        for _boxes, _labels in zip(boxes_batch, labels_batch):
-            image = draw_bounding_boxes(image, _boxes, _labels, width=2)
+        if labels_batch is None:
+            for _boxes in boxes_batch:
+                image = draw_bounding_boxes(image, _boxes, width=2)
+        else:
+            for _boxes, _labels in zip(boxes_batch, labels_batch):
+                image = draw_bounding_boxes(image, _boxes, _labels, width=2)
         return image
 
     # see https://pytorch.org/vision/main/generated/torchvision.ops.box_convert.html

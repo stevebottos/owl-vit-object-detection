@@ -279,21 +279,25 @@ class OwlViT(torch.nn.Module):
 
         return image_embeds
 
-    def forward(self, image: torch.Tensor):
+    def forward(self, image: torch.Tensor, return_with_embeddings=False):
         # Same naming convention as image_guided_detection
         feature_map = self.image_embedder(image)
-
         new_size = (
             feature_map.shape[0],
             feature_map.shape[1] * feature_map.shape[2],
             feature_map.shape[3],
         )
+
         image_feats = torch.reshape(feature_map, new_size)
+
         # Box predictions
         pred_boxes = self.box_predictor(image_feats, feature_map)
 
         # New class head that works off image_feats instead of feature_map
         pred_classes = self.cls_head(image_feats)
+
+        if return_with_embeddings:
+            return pred_boxes, pred_classes, image_feats
 
         return pred_boxes, pred_classes
 
