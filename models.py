@@ -8,6 +8,8 @@ from transformers.image_transforms import center_to_corners_format
 from torchvision.ops import box_area, nms, complete_box_iou_loss
 import numpy as np
 import torch.nn as nn
+from transformers import AutoProcessor
+from PIL import Image
 
 
 # modified from torchvision to also return the union
@@ -137,73 +139,6 @@ class HungarianMatcher(nn.Module):
         ]
 
 
-class FocalBoxLoss(torch.nn.Module):
-    def __init__(self, device, train_labelcouts, pos_neg_ratio=5):
-        super().__init__()
-        max_class = max(train_labelcouts)
-        scales = [
-            10 * 1 + (log(max_class / classcount)) for classcount in train_labelcouts
-        ]
-        scales.insert(0, 1)
-        # print(scales)
-        # print(max(scales))
-        # exit()
-        self.pos_neg_ratio = pos_neg_ratio
-        self.device = device
-        self.matcher = HungarianMatcher()
-        self.smoothl1 = torch.nn.SmoothL1Loss(reduction="sum")
-        self.cls_loss = torch.nn.CrossEntropyLoss(
-            weight=torch.tensor(scales), reduction="none"
-        ).to(self.device)
-
-    def forward(self, pred_boxes, pred_classes, boxes, labels):
-        batch_size = pred_boxes.size(0)
-
-        class_loss = torch.tensor(0.0).to(self.device)
-
-        # Prepare inputs for detr matcher
-        preds = {"pred_logits": pred_classes, "pred_boxes": pred_boxes}
-        gts = [
-            {"labels": _labels, "boxes": _boxes}
-            for _boxes, _labels in zip(boxes, labels)
-        ]
-
-        box_loss = torch.tensor(0.0).to(self.device)
-        batch_matches = self.matcher(preds, gts)
-        for i, (pred_i, gt_i) in enumerate(batch_matches):
-            # box loss
-            _pred_boxes = pred_boxes[i][pred_i]
-            _gt_boxes = boxes[i][gt_i]
-
-            # print(complete_box_iou_loss(_pred_boxes, _gt_boxes, reduction="sum"))
-            # box_loss += self.smoothl1(_pred_boxes, _gt_boxes)
-            box_loss += complete_box_iou_loss(_pred_boxes, _gt_boxes, reduction="sum")
-
-            # class loss
-            _pred_classes = pred_classes[i]
-            _labels = labels[i]
-
-            n_predictions, _ = _pred_classes.size()
-            batch_gts = torch.zeros(n_predictions).to(self.device).long()
-            batch_gts[pred_i] = _labels[gt_i]
-
-            _class_loss = self.cls_loss(
-                _pred_classes.to(self.device), batch_gts.to(self.device)
-            )
-
-            pos_ind = batch_gts != 0
-            pos_loss = _class_loss[pos_ind]
-            _class_loss[batch_gts != 0] = 0
-            neg_loss, _ = torch.sort(_class_loss, descending=True)
-            neg_loss = neg_loss[: pos_ind.sum() * self.pos_neg_ratio]
-
-            class_loss += (pos_loss.sum() + neg_loss.sum()) / pos_ind.sum()
-
-        box_loss /= batch_size
-        class_loss /= batch_size
-        return box_loss, class_loss
-
-
 class OwlViT(torch.nn.Module):
     """
     We don't train this that's why it's not an nn.Module subclass.
@@ -211,13 +146,21 @@ class OwlViT(torch.nn.Module):
     classifier to filter noise.
     """
 
-    def __init__(self, num_classes, width=768):
+    def __init__(self, labelmap, width=768):
         super().__init__()
 
+        self.labels = list(labelmap.values())
+
         model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
+        priors = self.init_priors(model)
+        self.querybank = torch.nn.Parameter(priors, requires_grad=True)
+        # self.querymask = [True] * self.querybank.shape(-1)
+
         self.backbone = model.owlvit.vision_model
         self.layernorm = model.layer_norm
         self.post_layernorm = model.owlvit.vision_model.post_layernorm
+        self.class_head = model.class_head
+        self.class_predictor = model.class_predictor
 
         # for name, parameter in self.backbone.named_parameters():
         #     if "layernorm" not in name:
@@ -234,15 +177,22 @@ class OwlViT(torch.nn.Module):
         self.sigmoid = model.sigmoid
         del model
 
-        self.cls_head = torch.nn.Sequential(
-            torch.nn.Linear(width, width),
-            torch.nn.Tanh(),
-            torch.nn.Linear(width, width),
-            torch.nn.Tanh(),
-            torch.nn.Linear(width, width),
-            torch.nn.Tanh(),
-            torch.nn.Linear(width, num_classes),
+    def init_priors(self, model):
+        """
+        Quick function to get priors for an set of labels. Kind of hacky...
+        TODO: extract just the stuff neede for text and use that instead of
+        loading in all this unnecessary stuff.
+        """
+
+        print("Setting up priors.")
+        processor = AutoProcessor.from_pretrained("google/owlvit-base-patch32")
+        inputs = processor(
+            text=[self.labels], images=Image.new("RGB", (224, 224)), return_tensors="pt"
         )
+        with torch.no_grad():
+            output = model(**inputs).text_embeds
+        print("Priors set.")
+        return output
 
     # Copied from transformers.models.clip.modeling_owlvit.OwlViTForObjectDetection.box_predictor
     # Removed some comments and docstring to clear up clutter for now
@@ -279,7 +229,12 @@ class OwlViT(torch.nn.Module):
 
         return image_embeds
 
-    def forward(self, image: torch.Tensor, return_with_embeddings=False):
+    def forward(
+        self,
+        image: torch.Tensor,
+        return_with_embeddings=False,
+        return_with_logits=False,
+    ):
         # Same naming convention as image_guided_detection
         feature_map = self.image_embedder(image)
         new_size = (
@@ -293,12 +248,35 @@ class OwlViT(torch.nn.Module):
         # Box predictions
         pred_boxes = self.box_predictor(image_feats, feature_map)
 
-        # New class head that works off image_feats instead of feature_map
-        pred_classes = self.cls_head(image_feats)
-
         if return_with_embeddings:
-            return pred_boxes, pred_classes, image_feats
+            return pred_boxes, image_feats
 
+        # TODO: monkey patch class head to not use in place ops so I don't have to clone
+        queries = self.querybank.clone()
+        pred_classes, image_embeds = self.class_predictor(
+            image_feats=image_feats, query_embeds=queries
+        )
+
+        if return_with_logits:
+            image_embeds = image_embeds / torch.linalg.norm(
+                image_embeds,
+                ord=2,
+                dim=-1,
+                keepdim=True,
+            )
+
+            queries = queries / torch.linalg.norm(
+                queries, ord=2, dim=-1, keepdim=True
+            ).squeeze(0)
+
+            image_embeds.squeeze_(0)
+            queries.squeeze_(0)
+
+            print(image_embeds.shape, queries.shape)
+            logits = torch.matmul(queries, image_embeds.t())
+            print(image_embeds.shape, queries.shape, logits.shape)
+            print(logits.shape)
+            exit()
         return pred_boxes, pred_classes
 
 
