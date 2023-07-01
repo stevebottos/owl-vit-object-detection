@@ -272,11 +272,9 @@ class OwlViT(torch.nn.Module):
             image_embeds.squeeze_(0)
             queries.squeeze_(0)
 
-            print(image_embeds.shape, queries.shape)
-            logits = torch.matmul(queries, image_embeds.t())
-            print(image_embeds.shape, queries.shape, logits.shape)
-            print(logits.shape)
-            exit()
+            logits = torch.matmul(queries, image_embeds.t()).t()
+
+            return pred_boxes, pred_classes, logits
         return pred_boxes, pred_classes
 
 

@@ -71,7 +71,6 @@ if __name__ == "__main__":
         k: v["name"] for k, v in classmap.items()
     }  # for more generic use later on when I generalize to non-coco stuff, as {idx: classname}
     labelmap.update({len(labelmap): "noise"})
-    print(labelmap)
     model = OwlViT(labelmap).to(device)
     # for n, p in model.class_head.named_parameters():
     #     print(n, p.device)
@@ -103,9 +102,10 @@ if __name__ == "__main__":
             boxes = coco_to_model_input(boxes, metadata).to(device)
 
             # Predict
-            all_pred_boxes, pred_classes = model(image, return_with_logits=True)
+            all_pred_boxes, pred_classes, logits = model(image, return_with_logits=True)
 
-            preds = {"pred_logits": pred_classes, "pred_boxes": all_pred_boxes}
+            # TODO: Use pred_classes or logits in loss?
+            preds = {"pred_logits": logits, "pred_boxes": all_pred_boxes}
             gts = [
                 {"labels": _labels, "boxes": _boxes}
                 for _boxes, _labels in zip(boxes, labels)
