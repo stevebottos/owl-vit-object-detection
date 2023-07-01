@@ -70,7 +70,8 @@ if __name__ == "__main__":
     labelmap = {
         k: v["name"] for k, v in classmap.items()
     }  # for more generic use later on when I generalize to non-coco stuff, as {idx: classname}
-
+    labelmap.update({len(labelmap): "noise"})
+    print(labelmap)
     model = OwlViT(labelmap).to(device)
     # for n, p in model.class_head.named_parameters():
     #     print(n, p.device)
