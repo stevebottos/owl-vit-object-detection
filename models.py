@@ -139,6 +139,45 @@ class HungarianMatcher(nn.Module):
         ]
 
 
+# Monkey patched for no in-place ops
+class PatchedOwlViTClassPredictionHead(nn.Module):
+    def __init__(self, original_cls_head):
+        super().__init__()
+
+        self.query_dim = original_cls_head.query_dim
+
+        self.dense0 = original_cls_head.dense0
+        self.logit_shift = original_cls_head.logit_shift
+        self.logit_scale = original_cls_head.logit_scale
+        self.elu = original_cls_head.elu
+
+    def forward(
+        self, image_embeds, query_embeds, class_masks=None
+    ):  # class_masks unused but monkey patch requires 3 args
+        image_class_embeds = self.dense0(image_embeds)
+
+        # Normalize image and text features
+        image_class_embeds = image_class_embeds / (
+            torch.linalg.norm(image_class_embeds, dim=-1, keepdim=True) + 1e-6
+        )
+        query_embeds = (
+            query_embeds / torch.linalg.norm(query_embeds, dim=-1, keepdim=True) + 1e-6
+        )
+
+        # Get class predictions
+        pred_logits = torch.einsum(
+            "...pd,...qd->...pq", image_class_embeds, query_embeds
+        )
+
+        # Apply a learnable shift and scale to logits
+        logit_shift = self.logit_shift(image_embeds)
+        logit_scale = self.logit_scale(image_embeds)
+        logit_scale = self.elu(logit_scale) + 1
+        pred_logits = (pred_logits + logit_shift) * logit_scale
+
+        return (pred_logits, image_class_embeds)
+
+
 class OwlViT(torch.nn.Module):
     """
     We don't train this that's why it's not an nn.Module subclass.
@@ -146,53 +185,23 @@ class OwlViT(torch.nn.Module):
     classifier to filter noise.
     """
 
-    def __init__(self, labelmap, width=768):
+    def __init__(self, pretrained_model, query_bank):
         super().__init__()
 
-        self.labels = list(labelmap.values())
-
-        model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
-        priors = self.init_priors(model)
-        self.querybank = torch.nn.Parameter(priors, requires_grad=True)
-        # self.querymask = [True] * self.querybank.shape(-1)
-
-        self.backbone = model.owlvit.vision_model
-        self.layernorm = model.layer_norm
-        self.post_layernorm = model.owlvit.vision_model.post_layernorm
-        self.class_head = model.class_head
-        self.class_predictor = model.class_predictor
-
-        # for name, parameter in self.backbone.named_parameters():
-        #     if "layernorm" not in name:
-        #         parameter.requires_grad = False
-
-        for parameter in self.backbone.parameters():
-            parameter.requires_grad = False
-
-        for parameter in self.post_layernorm.parameters():
-            parameter.requires_grad = False
-
-        self.box_head = model.box_head
-        self.compute_box_bias = model.compute_box_bias
-        self.sigmoid = model.sigmoid
-        del model
-
-    def init_priors(self, model):
-        """
-        Quick function to get priors for an set of labels. Kind of hacky...
-        TODO: extract just the stuff neede for text and use that instead of
-        loading in all this unnecessary stuff.
-        """
-
-        print("Setting up priors.")
-        processor = AutoProcessor.from_pretrained("google/owlvit-base-patch32")
-        inputs = processor(
-            text=[self.labels], images=Image.new("RGB", (224, 224)), return_tensors="pt"
+        # Take the pretrained components that are useful to us
+        pretrained_model.class_head = PatchedOwlViTClassPredictionHead(
+            pretrained_model.class_head
         )
-        with torch.no_grad():
-            output = model(**inputs).text_embeds
-        print("Priors set.")
-        return output
+        self.backbone = pretrained_model.owlvit.vision_model
+        self.layernorm = pretrained_model.layer_norm
+        self.post_layernorm = pretrained_model.owlvit.vision_model.post_layernorm
+        self.class_head = pretrained_model.class_head
+        self.class_predictor = pretrained_model.class_predictor
+        self.box_head = pretrained_model.box_head
+        self.compute_box_bias = pretrained_model.compute_box_bias
+        self.sigmoid = pretrained_model.sigmoid
+
+        self.queries = torch.nn.Parameter(query_bank, requires_grad=True)
 
     # Copied from transformers.models.clip.modeling_owlvit.OwlViTForObjectDetection.box_predictor
     # Removed some comments and docstring to clear up clutter for now
@@ -233,7 +242,6 @@ class OwlViT(torch.nn.Module):
         self,
         image: torch.Tensor,
         return_with_embeddings=False,
-        return_with_logits=False,
     ):
         # Same naming convention as image_guided_detection
         feature_map = self.image_embedder(image)
@@ -252,30 +260,32 @@ class OwlViT(torch.nn.Module):
             return pred_boxes, image_feats
 
         # TODO: monkey patch class head to not use in place ops so I don't have to clone
-        queries = self.querybank.clone()
-        pred_classes, image_embeds = self.class_predictor(
-            image_feats=image_feats, query_embeds=queries
+        pred_class_logits, image_embeds = self.class_predictor(
+            image_feats=image_feats, query_embeds=self.queries
         )
 
-        if return_with_logits:
-            image_embeds = image_embeds / torch.linalg.norm(
-                image_embeds,
-                ord=2,
-                dim=-1,
-                keepdim=True,
-            )
+        # TODO: Use these similarities and cosine loss
+        # TODO: Add temperature
+        # if return_with_logits:
+        #     image_embeds = image_embeds / torch.linalg.norm(
+        #         image_embeds,
+        #         ord=2,
+        #         dim=-1,
+        #         keepdim=True,
+        #     )
 
-            queries = queries / torch.linalg.norm(
-                queries, ord=2, dim=-1, keepdim=True
-            ).squeeze(0)
+        #     queries = queries / torch.linalg.norm(
+        #         queries, ord=2, dim=-1, keepdim=True
+        #     ).squeeze(0)
 
-            image_embeds.squeeze_(0)
-            queries.squeeze_(0)
+        #     image_embeds.squeeze_(0)
+        #     queries.squeeze_(0)
 
-            logits = torch.matmul(queries, image_embeds.t()).t()
+        #     logits = torch.matmul(queries, image_embeds.t()).t()
 
-            return pred_boxes, pred_classes, logits
-        return pred_boxes, pred_classes
+        #     return pred_boxes, pred_classes, logits.unsqueeze(0)
+
+        return pred_boxes, pred_class_logits
 
 
 class PostProcess:
@@ -306,3 +316,37 @@ class PostProcess:
         scores = scores[idx]
 
         return pred_boxes.unsqueeze_(0), classes.unsqueeze_(0), scores.unsqueeze_(0)
+
+
+def load_model(labelmap, device, freeze_last_backbone_layer=True):
+    _model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
+    _processor = AutoProcessor.from_pretrained("google/owlvit-base-patch32")
+
+    print("Initializing priors from labels...")
+    inputs = _processor(
+        text=[list(labelmap.values())],
+        images=Image.new("RGB", (224, 224)),
+        return_tensors="pt",
+    )
+
+    with torch.no_grad():
+        queries = _model(**inputs).text_embeds
+
+    patched_model = OwlViT(pretrained_model=_model, query_bank=queries)
+
+    for name, parameter in patched_model.backbone.named_parameters():
+        # Freeze all layers in vision encoder except last layer
+        if not freeze_last_backbone_layer and ".11." in name:
+            continue
+
+        parameter.requires_grad = False
+
+    for parameter in patched_model.box_head.parameters():
+        parameter.requires_grad = False
+
+    print("\nTrainable parameters:")
+    for name, parameter in patched_model.named_parameters():
+        if parameter.requires_grad:
+            print(name)
+
+    return patched_model.to(device)
