@@ -84,9 +84,10 @@ if __name__ == "__main__":
 
     model = load_model(labelmap, device)
     postprocess = PostProcess(confidence_threshold=0.5, iou_threshold=0.2)
-
     criterion = get_criterion(num_classes=len(classmap)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+    scaler = torch.cuda.amp.GradScaler()
+    metric = MeanAveragePrecision(iou_type="bbox").to(device)
 
     model.train()
     torch.autograd.set_detect_anomaly(True)
@@ -113,7 +114,6 @@ if __name__ == "__main__":
             # Predict
             all_pred_boxes, pred_classes, similarities = model(image)
 
-            # TODO: Use pred_classes or logits in loss?
             preds = {
                 "pred_logits": pred_classes,  # pred_classes,
                 "pred_boxes": all_pred_boxes,
@@ -159,7 +159,6 @@ if __name__ == "__main__":
                 pred_boxes = pred_boxes.cpu()
 
                 pred_classes_with_names = labels_to_classnames(pred_classes, classmap)
-                pred_boxes = model_output_to_image(pred_boxes, metadata)
 
                 if training_cfg["save_debug_images"]:
                     image_with_boxes = BoxUtil.draw_box_on_image(
@@ -167,31 +166,35 @@ if __name__ == "__main__":
                     )
                     write_png(image_with_boxes, f"debug/{epoch}/eval/{i}.jpg")
 
-                # Write in coco format
-                pred_boxes = BoxUtil.box_convert(pred_boxes, "xyxy", "xywh")
+                pred_boxes = BoxUtil.scale_bounding_box(
+                    pred_boxes.cpu(), metadata["width"], metadata["height"], mode="up"
+                )
+                boxes = BoxUtil.scale_bounding_box(
+                    boxes.cpu(), metadata["width"], metadata["height"], mode="up"
+                )
 
+                preds = []
                 for _pred_boxes, _pred_classes, _scores in zip(
                     pred_boxes, pred_classes, scores
                 ):
-                    for _pred_box, _pred_class, _score in zip(
-                        _pred_boxes.tolist(), _pred_classes.tolist(), _scores.tolist()
-                    ):
-                        results.append(
-                            {
-                                "image_id": metadata["image_id"].item(),
-                                "category_id": classmap[_pred_class]["actual_category"],
-                                "bbox": _pred_box,
-                                "score": _score,
-                            }
-                        )
+                    preds.append(
+                        {
+                            "boxes": _pred_boxes,
+                            "scores": _scores,
+                            "labels": _pred_classes,
+                        }
+                    )
 
-        with NamedTemporaryFile(suffix=".json") as tmp:
-            with open(tmp.name, "w") as f:
-                json.dump(results, f)
+                targets = []
+                for _boxes, _classes in zip(boxes, labels):
+                    targets.append(
+                        {
+                            "boxes": _boxes,
+                            "labels": _classes,
+                        }
+                    )
 
-            cocoGT = test_dataloader.dataset.coco
-            cocoDT = cocoGT.loadRes(tmp.name)
-            coco_eval = COCOeval(cocoGT, cocoDT, "bbox")
-            coco_eval.evaluate()
-            coco_eval.accumulate()
-            coco_eval.summarize()
+                metric.update(preds, targets)
+        print("Computing metrics...")
+        result = metric.compute()
+        print(*result, sep="\n")
