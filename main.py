@@ -2,14 +2,14 @@ import os
 
 import torch
 import yaml
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from torchvision.io import write_png
 from tqdm import tqdm
 
-from data.dataset import get_dataloaders
-from losses import get_criterion
-from models import load_model, PostProcess
-from util import BoxUtil, GeneralLossAccumulator, TensorboardLossAccumulator
-from torchmetrics.detection.mean_ap import MeanAveragePrecision
+from src.dataset import get_dataloaders
+from src.losses import get_criterion
+from src.models import PostProcess, load_model
+from src.util import BoxUtil, GeneralLossAccumulator, TensorboardLossAccumulator
 
 
 def get_training_config():
@@ -93,9 +93,7 @@ if __name__ == "__main__":
     training_cfg = get_training_config()
     train_dataloader, test_dataloader, scales, labelmap = get_dataloaders()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    criterion = get_criterion(num_classes=len(labelmap) - 1, class_weights=scales).to(
-        device
-    )
+    criterion = get_criterion(num_classes=len(labelmap) - 1).to(device)
 
     model = load_model(labelmap, device)
     postprocess = PostProcess(confidence_threshold=0.5, iou_threshold=0.1)

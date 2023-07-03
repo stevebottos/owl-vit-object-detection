@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -6,7 +8,6 @@ from torch.nn.functional import softmax
 from torchvision.ops import nms
 from transformers import AutoProcessor, OwlViTForObjectDetection
 from transformers.image_transforms import center_to_corners_format
-import os
 
 
 # Monkey patched for no in-place ops

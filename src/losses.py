@@ -2,14 +2,12 @@
 # and made some minor tweaks
 
 import torch
-import torch.nn.functional as F
-from torch import nn
 import torch.distributed as dist
-from torchvision.ops import box_area
-
-from scipy.optimize import linear_sum_assignment
-import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from scipy.optimize import linear_sum_assignment
+from torch import nn
+from torchvision.ops import box_area
 
 
 def is_dist_avail_and_initialized():

@@ -1,12 +1,13 @@
+import json
 import os
+from collections import Counter
+
+import numpy as np
 import torch
+import yaml
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from transformers import OwlViTProcessor
-import yaml
-import json
-from collections import Counter
-import numpy as np
 
 TRAIN_ANNOTATIONS_FILE = "data/train.json"
 TEST_ANNOTATIONS_FILE = "data/test.json"
