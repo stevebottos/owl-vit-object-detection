@@ -20,9 +20,7 @@ class PatchedOwlViTClassPredictionHead(nn.Module):
         self.logit_scale = original_cls_head.logit_scale
         self.elu = original_cls_head.elu
 
-    def forward(
-        self, image_embeds, query_embeds, class_masks=None
-    ):  # class_masks unused but monkey patch requires 3 args
+    def forward(self, image_embeds, query_embeds):
         image_class_embeds = self.dense0(image_embeds)
 
         # Normalize image and text features
@@ -44,7 +42,7 @@ class PatchedOwlViTClassPredictionHead(nn.Module):
         logit_scale = self.elu(logit_scale) + 1
         pred_logits = (pred_logits + logit_shift) * logit_scale
 
-        return (pred_logits, image_class_embeds)
+        return pred_logits, image_class_embeds, query_embeds
 
 
 class OwlViT(torch.nn.Module):
@@ -131,32 +129,17 @@ class OwlViT(torch.nn.Module):
             return pred_boxes, image_feats
 
         # TODO: monkey patch class head to not use in place ops so I don't have to clone
-        pred_class_logits, image_embeds = self.class_predictor(
-            image_feats, self.queries
-        )
+        (
+            pred_class_logits,
+            image_embeds_normalized,
+            query_embeds_normalized,
+        ) = self.class_predictor(image_feats, self.queries)
 
-        # TODO: Use these similarities and cosine loss
-        # TODO: Add temperature
-        # if return_with_logits:
-        #     image_embeds = image_embeds / torch.linalg.norm(
-        #         image_embeds,
-        #         ord=2,
-        #         dim=-1,
-        #         keepdim=True,
-        #     )
+        sims = torch.matmul(
+            query_embeds_normalized.squeeze(0), image_embeds_normalized.squeeze(0).t()
+        ).t()
 
-        #     queries = queries / torch.linalg.norm(
-        #         queries, ord=2, dim=-1, keepdim=True
-        #     ).squeeze(0)
-
-        #     image_embeds.squeeze_(0)
-        #     queries.squeeze_(0)
-
-        #     logits = torch.matmul(queries, image_embeds.t()).t()
-
-        #     return pred_boxes, pred_classes, logits.unsqueeze(0)
-
-        return pred_boxes, pred_class_logits
+        return pred_boxes, pred_class_logits, sims.unsqueeze(0)
 
 
 class PostProcess:

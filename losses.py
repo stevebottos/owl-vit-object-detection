@@ -186,29 +186,36 @@ class SetCriterion(nn.Module):
         weight_dict,
         eos_coef=0.01,  # Relative classification weight of the no-object class, default is 0.1
         losses=["labels", "boxes"],  # losses to return
+        class_loss_mode="logits",
     ):
-        """Create the criterion.
-        Parameters:
-            num_classes: number of object categories, omitting the special no-object category
-            matcher: module able to compute a matching between targets and proposals
-            weight_dict: dict containing as key the names of the losses and as values their relative weight.
-            eos_coef: relative classification weight applied to the no-object category
-            losses: list of all the losses to be applied. See get_loss for list of available losses.
-        """
         super().__init__()
         self.num_classes = num_classes
         self.matcher = matcher
         self.weight_dict = weight_dict
         self.eos_coef = eos_coef
         self.losses = losses
-        empty_weight = torch.ones(self.num_classes + 1)
-        empty_weight[-1] = self.eos_coef
-        self.register_buffer("empty_weight", empty_weight)
+        class_weight = torch.ones(self.num_classes + 1)
+        class_weight[-1] = self.eos_coef
+        self.register_buffer("class_weight", class_weight)
+        self.class_loss_mode = class_loss_mode
+
+    def _get_src_permutation_idx(self, indices):
+        # permute predictions following indices
+        batch_idx = torch.cat(
+            [torch.full_like(src, i) for i, (src, _) in enumerate(indices)]
+        )
+        src_idx = torch.cat([src for (src, _) in indices])
+        return batch_idx, src_idx
+
+    def _get_tgt_permutation_idx(self, indices):
+        # permute targets following indices
+        batch_idx = torch.cat(
+            [torch.full_like(tgt, i) for i, (_, tgt) in enumerate(indices)]
+        )
+        tgt_idx = torch.cat([tgt for (_, tgt) in indices])
+        return batch_idx, tgt_idx
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=False):
-        """Classification loss (NLL)
-        targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
-        """
         assert "pred_logits" in outputs
         src_logits = outputs["pred_logits"]
 
@@ -225,62 +232,34 @@ class SetCriterion(nn.Module):
         )
         target_classes[idx] = target_classes_o
 
-        loss_ce = F.cross_entropy(
-            src_logits.transpose(1, 2),
-            target_classes,
-            self.empty_weight,
-            reduction="none",
-        )
+        if self.class_loss_mode == "logits":
+            loss_ce = F.cross_entropy(
+                src_logits.transpose(1, 2),
+                target_classes,
+                self.class_weight,
+                reduction="none",
+            )
+        elif self.class_loss_mode == "similarities":
+            # TODO: This is a WIP
+            scales = torch.ones(target_classes.shape).to(target_classes.device)
+            scales[torch.where(target_classes == 80)] = self.eos_coef
+
+            target_classes_1h = F.one_hot(target_classes, num_classes=81).float()
+
+            loss_ce = F.mse_loss(src_logits, target_classes_1h, reduction="none").sum(
+                dim=-1
+            )
+            loss_ce *= scales
 
         losses = {"loss_ce": loss_ce.mean()}
+
         metadata = {
             "loss_ce": loss_ce[
                 torch.where(target_classes != self.num_classes)
             ].tolist()  # background class is always the last class
         }
 
-        if log:
-            # TODO this should probably be a separate loss, not hacked in this one here
-            losses["class_error"] = 100 - accuracy(src_logits[idx], target_classes_o)[0]
-
         return losses, metadata
-
-    # Cosine version
-    # def loss_labels(self, outputs, targets, indices, _, log=False):
-    #     assert "pred_logits" in outputs
-    #     src_logits = outputs["pred_logits"]
-
-    #     idx = self._get_src_permutation_idx(indices)
-
-    #     target_classes_o = torch.cat(
-    #         [t["labels"][J] for t, (_, J) in zip(targets, indices)]
-    #     )
-    #     target_classes = torch.full(
-    #         src_logits.shape[:2],
-    #         self.num_classes,
-    #         dtype=torch.int64,
-    #         device=src_logits.device,
-    #     )
-    #     target_classes[idx] = target_classes_o
-
-    #     scales = torch.ones(target_classes.shape).to(target_classes.device)
-    #     scales[torch.where(target_classes == 80)] = 0.001
-
-    #     target_classes_1h = F.one_hot(target_classes, num_classes=81).float()
-
-    #     loss_ce = F.mse_loss(src_logits, target_classes_1h, reduction="none").sum(
-    #         dim=-1
-    #     )
-    #     loss_ce *= scales
-
-    #     losses = {"loss_ce": loss_ce.mean()}
-    #     metadata = {
-    #         "loss_ce": loss_ce[
-    #             torch.where(target_classes != self.num_classes)
-    #         ].tolist()  # background class is always the last class
-    #     }
-
-    #     return losses, metadata
 
     def loss_boxes(self, outputs, targets, indices, num_boxes):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
@@ -307,22 +286,6 @@ class SetCriterion(nn.Module):
         metadata["loss_giou"] = loss_bbox.tolist()
 
         return losses, metadata
-
-    def _get_src_permutation_idx(self, indices):
-        # permute predictions following indices
-        batch_idx = torch.cat(
-            [torch.full_like(src, i) for i, (src, _) in enumerate(indices)]
-        )
-        src_idx = torch.cat([src for (src, _) in indices])
-        return batch_idx, src_idx
-
-    def _get_tgt_permutation_idx(self, indices):
-        # permute targets following indices
-        batch_idx = torch.cat(
-            [torch.full_like(tgt, i) for i, (_, tgt) in enumerate(indices)]
-        )
-        tgt_idx = torch.cat([tgt for (_, tgt) in indices])
-        return batch_idx, tgt_idx
 
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {
@@ -384,7 +347,7 @@ class SetCriterion(nn.Module):
         return losses, metadata
 
 
-def get_criterion(num_classes):
+def get_criterion(num_classes, class_loss_mode):
     weight_dict = {
         "loss_ce": 1,
         "loss_giou": 2,
@@ -394,7 +357,10 @@ def get_criterion(num_classes):
     matcher = HungarianMatcher()
 
     criterion = SetCriterion(
-        num_classes=num_classes, matcher=matcher, weight_dict=weight_dict
+        num_classes=num_classes,
+        matcher=matcher,
+        weight_dict=weight_dict,
+        class_loss_mode=class_loss_mode,
     )
 
     return criterion
