@@ -6,6 +6,7 @@ from torch.nn.functional import softmax
 from torchvision.ops import nms
 from transformers import AutoProcessor, OwlViTForObjectDetection
 from transformers.image_transforms import center_to_corners_format
+import os
 
 
 # Monkey patched for no in-place ops
@@ -173,6 +174,8 @@ class PostProcess:
 
 
 def load_model(labelmap, device, freeze_last_backbone_layer=True):
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
     _model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
     _processor = AutoProcessor.from_pretrained("google/owlvit-base-patch32")
 
@@ -198,9 +201,9 @@ def load_model(labelmap, device, freeze_last_backbone_layer=True):
     for parameter in patched_model.box_head.parameters():
         parameter.requires_grad = False
 
-    print("\nTrainable parameters:")
+    print("Trainable parameters:")
     for name, parameter in patched_model.named_parameters():
         if parameter.requires_grad:
-            print(name)
+            print(f"  {name}")
 
     return patched_model.to(device)

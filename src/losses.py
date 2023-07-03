@@ -186,6 +186,7 @@ class SetCriterion(nn.Module):
         weight_dict,
         eos_coef=0.01,  # Relative classification weight of the no-object class, default is 0.1
         losses=["labels", "boxes"],  # losses to return
+        class_weight=None,
         class_loss_mode="logits",
     ):
         super().__init__()
@@ -194,10 +195,15 @@ class SetCriterion(nn.Module):
         self.weight_dict = weight_dict
         self.eos_coef = eos_coef
         self.losses = losses
-        class_weight = torch.ones(self.num_classes + 1)
-        class_weight[-1] = self.eos_coef
-        self.register_buffer("class_weight", class_weight)
         self.class_loss_mode = class_loss_mode
+
+        if class_weight is None:
+            class_weight = torch.ones(self.num_classes + 1)
+            class_weight[-1] = self.eos_coef
+        else:
+            class_weight = torch.tensor(class_weight)
+
+        self.register_buffer("class_weight", class_weight)
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
@@ -347,7 +353,7 @@ class SetCriterion(nn.Module):
         return losses, metadata
 
 
-def get_criterion(num_classes, class_loss_mode="logits"):
+def get_criterion(num_classes, class_weights=None, class_loss_mode="logits"):
     weight_dict = {
         "loss_ce": 1,
         "loss_giou": 2,
@@ -361,6 +367,7 @@ def get_criterion(num_classes, class_loss_mode="logits"):
         matcher=matcher,
         weight_dict=weight_dict,
         class_loss_mode=class_loss_mode,
+        class_weight=class_weights,
     )
 
     return criterion

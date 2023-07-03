@@ -1,11 +1,7 @@
-import json
 import os
-from tempfile import NamedTemporaryFile
 
 import torch
 import yaml
-from pycocotools.coco import COCO
-from pycocotools.cocoeval import COCOeval
 from torchvision.io import write_png
 from tqdm import tqdm
 
@@ -23,6 +19,9 @@ def get_training_config():
 
 
 def coco_to_model_input(boxes, metadata):
+    """
+    absolute xywh -> relative xyxy
+    """
     boxes = BoxUtil.box_convert(boxes, "xywh", "xyxy")
     boxes = BoxUtil.scale_bounding_box(
         boxes, metadata["width"], metadata["height"], mode="down"
@@ -48,19 +47,38 @@ def reverse_labelmap(labelmap):
     }
 
 
-def invalid_batch(boxes):
-    # Some images don't have box annotations. Just skip these
-    return boxes.size(1) == 0
+def labels_to_classnames(labels, labelmap):
+    return [[labelmap[str(l.item())] for l in labels[0]]]
 
 
-def labels_to_classnames(pred_classes, classmap):
-    pred_classes_with_names = []
-    for _pcwn in pred_classes:
-        pred_classes_with_names.append(
-            [classmap[_pred_class.item()]["name"] for _pred_class in _pcwn]
+def update_metrics(metric, metadata, pred_boxes, pred_classes, scores, boxes, labels):
+    pred_boxes = BoxUtil.scale_bounding_box(
+        pred_boxes.cpu(), metadata["width"], metadata["height"], mode="up"
+    )
+    boxes = BoxUtil.scale_bounding_box(
+        boxes.cpu(), metadata["width"], metadata["height"], mode="up"
+    )
+
+    preds = []
+    for _pred_boxes, _pred_classes, _scores in zip(pred_boxes, pred_classes, scores):
+        preds.append(
+            {
+                "boxes": _pred_boxes,
+                "scores": _scores,
+                "labels": _pred_classes,
+            }
         )
 
-    return pred_classes_with_names
+    targets = []
+    for _boxes, _classes in zip(boxes, labels):
+        targets.append(
+            {
+                "boxes": _boxes,
+                "labels": _classes,
+            }
+        )
+
+    metric.update(preds, targets)
 
 
 if __name__ == "__main__":
@@ -73,24 +91,20 @@ if __name__ == "__main__":
         ...
 
     training_cfg = get_training_config()
-    train_dataloader, test_dataloader, train_labelcounts = get_dataloaders()
+    train_dataloader, test_dataloader, scales, labelmap = get_dataloaders()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    classmap = reverse_labelmap(train_dataloader.dataset.labelmap)
-    labelmap = {
-        k: v["name"] for k, v in classmap.items()
-    }  # for more generic use later on when I generalize to non-coco stuff, as {idx: classname}
-    labelmap.update({len(labelmap): "noise"})
+    criterion = get_criterion(num_classes=len(labelmap) - 1, class_weights=scales).to(
+        device
+    )
 
     model = load_model(labelmap, device)
-    postprocess = PostProcess(confidence_threshold=0.5, iou_threshold=0.2)
-    criterion = get_criterion(num_classes=len(classmap)).to(device)
+    postprocess = PostProcess(confidence_threshold=0.5, iou_threshold=0.1)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
-    scaler = torch.cuda.amp.GradScaler()
     metric = MeanAveragePrecision(iou_type="bbox").to(device)
+    scaler = torch.cuda.amp.GradScaler()
 
     model.train()
-    torch.autograd.set_detect_anomaly(True)
     for epoch in range(training_cfg["n_epochs"]):
         if training_cfg["save_debug_images"]:
             os.makedirs(f"debug/{epoch}/eval", exist_ok=True)
@@ -101,38 +115,38 @@ if __name__ == "__main__":
         for i, (image, labels, boxes, metadata) in enumerate(
             tqdm(train_dataloader, ncols=60)
         ):
-            if invalid_batch(boxes):
-                continue
-
-            model.zero_grad()
+            optimizer.zero_grad()
 
             # Prep inputs
             image = image.to(device)
             labels = labels.to(device)
             boxes = coco_to_model_input(boxes, metadata).to(device)
 
-            # Predict
-            all_pred_boxes, pred_classes, similarities = model(image)
+            with torch.cuda.amp.autocast():
+                # Predict
+                all_pred_boxes, pred_classes, similarities = model(image)
 
-            preds = {
-                "pred_logits": pred_classes,  # pred_classes,
-                "pred_boxes": all_pred_boxes,
-            }
-            gts = [
-                {"labels": _labels, "boxes": _boxes}
-                for _boxes, _labels in zip(boxes, labels)
-            ]
+                preds = {
+                    "pred_logits": pred_classes,  # pred_classes,
+                    "pred_boxes": all_pred_boxes,
+                }
+                gts = [
+                    {"labels": _labels, "boxes": _boxes}
+                    for _boxes, _labels in zip(boxes, labels)
+                ]
 
-            losses, metadata = criterion(preds, gts)
+                losses, metalosses = criterion(preds, gts)
 
             loss = losses["loss_ce"] + losses["loss_bbox"] + losses["loss_giou"]
-            loss.backward()
-            optimizer.step()
-
+            # loss.backward()
+            scaler.scale(loss).backward()
+            # optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             # Update accumulators
             general_loss.update(losses)
             tensorboard_finegrained_loss.update(
-                labels_to_classnames(labels, classmap).pop(), metadata["loss_ce"]
+                labels_to_classnames(labels, labelmap).pop(), metalosses["loss_ce"]
             )
 
         tensorboard_finegrained_loss.write(epoch)
@@ -146,9 +160,6 @@ if __name__ == "__main__":
             for i, (image, labels, boxes, metadata) in enumerate(
                 tqdm(test_dataloader, ncols=60)
             ):
-                if invalid_batch(boxes):
-                    continue
-
                 # Prep inputs
                 image = image.to(device)
                 labels = labels.to(device)
@@ -156,45 +167,26 @@ if __name__ == "__main__":
 
                 # Get predictions and save output
                 pred_boxes, pred_classes, scores = postprocess(*model(image)[:-1])
-                pred_boxes = pred_boxes.cpu()
-
-                pred_classes_with_names = labels_to_classnames(pred_classes, classmap)
-
+                update_metrics(
+                    metric,
+                    metadata,
+                    pred_boxes,
+                    pred_classes,
+                    scores,
+                    boxes,
+                    labels,
+                )
+                pred_classes_with_names = labels_to_classnames(pred_classes, labelmap)
                 if training_cfg["save_debug_images"]:
+                    pred_boxes = model_output_to_image(pred_boxes.cpu(), metadata)
                     image_with_boxes = BoxUtil.draw_box_on_image(
-                        metadata["impath"].pop(), pred_boxes, pred_classes_with_names
+                        metadata["impath"].pop(),
+                        pred_boxes,
+                        pred_classes_with_names,
                     )
+
                     write_png(image_with_boxes, f"debug/{epoch}/eval/{i}.jpg")
 
-                pred_boxes = BoxUtil.scale_bounding_box(
-                    pred_boxes.cpu(), metadata["width"], metadata["height"], mode="up"
-                )
-                boxes = BoxUtil.scale_bounding_box(
-                    boxes.cpu(), metadata["width"], metadata["height"], mode="up"
-                )
-
-                preds = []
-                for _pred_boxes, _pred_classes, _scores in zip(
-                    pred_boxes, pred_classes, scores
-                ):
-                    preds.append(
-                        {
-                            "boxes": _pred_boxes,
-                            "scores": _scores,
-                            "labels": _pred_classes,
-                        }
-                    )
-
-                targets = []
-                for _boxes, _classes in zip(boxes, labels):
-                    targets.append(
-                        {
-                            "boxes": _boxes,
-                            "labels": _classes,
-                        }
-                    )
-
-                metric.update(preds, targets)
         print("Computing metrics...")
         result = metric.compute()
-        print(*result, sep="\n")
+        print(*result.items(), sep="\n")
