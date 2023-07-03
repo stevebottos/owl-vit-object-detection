@@ -63,6 +63,14 @@ def labels_to_classnames(pred_classes, classmap):
 
 
 if __name__ == "__main__":
+    try:
+        import shutil
+
+        shutil.rmtree("debug")
+        shutil.rmtree("logs")
+    except:
+        ...
+
     training_cfg = get_training_config()
     train_dataloader, test_dataloader, train_labelcounts = get_dataloaders()
     device = "cuda" if torch.cuda.is_available() else "cpu"

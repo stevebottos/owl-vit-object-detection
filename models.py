@@ -1,15 +1,11 @@
-from math import log
-
-from scipy.optimize import linear_sum_assignment
-import torch
-from torch.nn.functional import softmax
-from transformers import OwlViTForObjectDetection
-from transformers.image_transforms import center_to_corners_format
-from torchvision.ops import box_area, nms, complete_box_iou_loss
 import numpy as np
+import torch
 import torch.nn as nn
-from transformers import AutoProcessor
 from PIL import Image
+from torch.nn.functional import softmax
+from torchvision.ops import nms
+from transformers import AutoProcessor, OwlViTForObjectDetection
+from transformers.image_transforms import center_to_corners_format
 
 
 # Monkey patched for no in-place ops
@@ -76,7 +72,7 @@ class OwlViT(torch.nn.Module):
         self.compute_box_bias = pretrained_model.compute_box_bias
         self.sigmoid = pretrained_model.sigmoid
 
-        self.queries = torch.nn.Parameter(query_bank, requires_grad=True)
+        self.queries = torch.nn.Parameter(query_bank, requires_grad=False)
 
     # Copied from transformers.models.clip.modeling_owlvit.OwlViTForObjectDetection.box_predictor
     # Removed some comments and docstring to clear up clutter for now
