@@ -1,6 +1,6 @@
 # NOTICE: I'll be updating this repo periodically until I'm happy with it, at which point I'll make a release. Please watch and star to stay up to date.
 # TODO
-- [x] **Introduce a learnable query bank.** The original Owl-VIT model is multi-modal, taking an image and a prompt as input. Now, the model computes a set of initial queries based on the labels provided which become a parameter of the model. The queries are injected during each forward pass, optimal queries for each class are learned through training. See `experiments/check_text_embeddings_as_priors.ipynb' for more details.
+- [x] **Introduce a learnable query bank.** The original Owl-VIT model is multi-modal, taking an image and a prompt as input. Now, the model computes a set of initial queries based on the labels provided which become a parameter of the model. The queries are injected during each forward pass, optimal queries for each class are learned through training. See `experiments/check_text_embeddings_as_priors.ipynb` for more details.
 - [x] **Get rid of pycocotools.** It is annoying.
 - [ ] **Benchmarks.** Do some benchmarking writeups.
 - [ ] **Improve model.** Currently, while the model is functional, it isn't optimal. There seem to be some issues due to the fact that a ton of boxes end up clustered around the object of interest (see `experiments/check_zero_shot_results.ipynb`) that the model is having trouble learning through but this requires more investigation.
