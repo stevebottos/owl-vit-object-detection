@@ -1,207 +1,48 @@
-from math import log
-
-from scipy.optimize import linear_sum_assignment
-import torch
-from torch.nn.functional import softmax
-from transformers import OwlViTForObjectDetection
-from transformers.image_transforms import center_to_corners_format
-from torchvision.ops import box_area, nms, complete_box_iou_loss
 import numpy as np
+import torch
 import torch.nn as nn
+from PIL import Image
+from torch.nn.functional import softmax
+from torchvision.ops import nms
+from transformers import AutoProcessor, OwlViTForObjectDetection
+from transformers.image_transforms import center_to_corners_format
 
 
-# modified from torchvision to also return the union
-def box_iou(boxes1, boxes2):
-    area1 = box_area(boxes1)
-    area2 = box_area(boxes2)
-
-    lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # [N,M,2]
-    rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # [N,M,2]
-
-    wh = (rb - lt).clamp(min=0)  # [N,M,2]
-    inter = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
-
-    union = area1[:, None] + area2 - inter
-
-    iou = inter / union
-    return iou, union
-
-
-# from https://github.com/facebookresearch/detr/blob/main/util/box_ops.py
-def generalized_box_iou(boxes1, boxes2):
-    """
-    Generalized IoU from https://giou.stanford.edu/
-    The boxes should be in [x0, y0, x1, y1] format
-    Returns a [N, M] pairwise matrix, where N = len(boxes1)
-    and M = len(boxes2)
-    """
-    # degenerate boxes gives inf / nan results
-    # so do an early check
-    assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
-    assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
-    iou, union = box_iou(boxes1, boxes2)
-
-    lt = torch.min(boxes1[:, None, :2], boxes2[:, :2])
-    rb = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])
-
-    wh = (rb - lt).clamp(min=0)  # [N,M,2]
-    area = wh[:, :, 0] * wh[:, :, 1]
-
-    return iou - (area - union) / area
-
-
-# From https://github.com/facebookresearch/detr/blob/main/models/matcher.py
-class HungarianMatcher(nn.Module):
-    """This class computes an assignment between the targets and the predictions of the network
-    For efficiency reasons, the targets don't include the no_object. Because of this, in general,
-    there are more predictions than targets. In this case, we do a 1-to-1 matching of the best predictions,
-    while the others are un-matched (and thus treated as non-objects).
-    """
-
-    def __init__(
-        self, cost_class: float = 1, cost_bbox: float = 1, cost_giou: float = 1
-    ):
-        """Creates the matcher
-        Params:
-            cost_class: This is the relative weight of the classification error in the matching cost
-            cost_bbox: This is the relative weight of the L1 error of the bounding box coordinates in the matching cost
-            cost_giou: This is the relative weight of the giou loss of the bounding box in the matching cost
-        """
+# Monkey patched for no in-place ops
+class PatchedOwlViTClassPredictionHead(nn.Module):
+    def __init__(self, original_cls_head):
         super().__init__()
-        self.cost_class = cost_class
-        self.cost_bbox = cost_bbox
-        self.cost_giou = cost_giou
-        assert (
-            cost_class != 0 or cost_bbox != 0 or cost_giou != 0
-        ), "all costs cant be 0"
 
-    @torch.no_grad()
-    def forward(self, outputs, targets):
-        """Performs the matching
-        Params:
-            outputs: This is a dict that contains at least these entries:
-                 "pred_logits": Tensor of dim [batch_size, num_queries, num_classes] with the classification logits
-                 "pred_boxes": Tensor of dim [batch_size, num_queries, 4] with the predicted box coordinates
-            targets: This is a list of targets (len(targets) = batch_size), where each target is a dict containing:
-                 "labels": Tensor of dim [num_target_boxes] (where num_target_boxes is the number of ground-truth
-                           objects in the target) containing the class labels
-                 "boxes": Tensor of dim [num_target_boxes, 4] containing the target box coordinates
-        Returns:
-            A list of size batch_size, containing tuples of (index_i, index_j) where:
-                - index_i is the indices of the selected predictions (in order)
-                - index_j is the indices of the corresponding selected targets (in order)
-            For each batch element, it holds:
-                len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
-        """
-        bs, num_queries = outputs["pred_logits"].shape[:2]
+        self.query_dim = original_cls_head.query_dim
 
-        # We flatten to compute the cost matrices in a batch
-        out_prob = (
-            outputs["pred_logits"].flatten(0, 1).softmax(-1)
-        )  # [batch_size * num_queries, num_classes]
-        out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
+        self.dense0 = original_cls_head.dense0
+        self.logit_shift = original_cls_head.logit_shift
+        self.logit_scale = original_cls_head.logit_scale
+        self.elu = original_cls_head.elu
 
-        # Also concat the target labels and boxes
-        tgt_ids = torch.cat([v["labels"] for v in targets])
-        tgt_bbox = torch.cat([v["boxes"] for v in targets])
+    def forward(self, image_embeds, query_embeds):
+        image_class_embeds = self.dense0(image_embeds)
 
-        # Compute the classification cost. Contrary to the loss, we don't use the NLL,
-        # but approximate it in 1 - proba[target class].
-        # The 1 is a constant that doesn't change the matching, it can be ommitted.
-        cost_class = -out_prob[:, tgt_ids]
-
-        # Compute the L1 cost between boxes
-        cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
-
-        # Compute the giou cost betwen boxes
-        cost_giou = -generalized_box_iou(out_bbox, tgt_bbox)
-
-        # Final cost matrix
-        C = (
-            self.cost_bbox * cost_bbox
-            + self.cost_class * cost_class
-            + self.cost_giou * cost_giou
+        # Normalize image and text features
+        image_class_embeds = image_class_embeds / (
+            torch.linalg.norm(image_class_embeds, dim=-1, keepdim=True) + 1e-6
         )
-        C = C.view(bs, num_queries, -1).cpu()
+        query_embeds = (
+            query_embeds / torch.linalg.norm(query_embeds, dim=-1, keepdim=True) + 1e-6
+        )
 
-        sizes = [len(v["boxes"]) for v in targets]
-        indices = [
-            linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))
-        ]
-        return [
-            (
-                torch.as_tensor(i, dtype=torch.int64),
-                torch.as_tensor(j, dtype=torch.int64),
-            )
-            for i, j in indices
-        ]
+        # Get class predictions
+        pred_logits = torch.einsum(
+            "...pd,...qd->...pq", image_class_embeds, query_embeds
+        )
 
+        # Apply a learnable shift and scale to logits
+        logit_shift = self.logit_shift(image_embeds)
+        logit_scale = self.logit_scale(image_embeds)
+        logit_scale = self.elu(logit_scale) + 1
+        pred_logits = (pred_logits + logit_shift) * logit_scale
 
-class FocalBoxLoss(torch.nn.Module):
-    def __init__(self, device, train_labelcouts, pos_neg_ratio=5):
-        super().__init__()
-        max_class = max(train_labelcouts)
-        scales = [
-            10 * 1 + (log(max_class / classcount)) for classcount in train_labelcouts
-        ]
-        scales.insert(0, 1)
-        # print(scales)
-        # print(max(scales))
-        # exit()
-        self.pos_neg_ratio = pos_neg_ratio
-        self.device = device
-        self.matcher = HungarianMatcher()
-        self.smoothl1 = torch.nn.SmoothL1Loss(reduction="sum")
-        self.cls_loss = torch.nn.CrossEntropyLoss(
-            weight=torch.tensor(scales), reduction="none"
-        ).to(self.device)
-
-    def forward(self, pred_boxes, pred_classes, boxes, labels):
-        batch_size = pred_boxes.size(0)
-
-        class_loss = torch.tensor(0.0).to(self.device)
-
-        # Prepare inputs for detr matcher
-        preds = {"pred_logits": pred_classes, "pred_boxes": pred_boxes}
-        gts = [
-            {"labels": _labels, "boxes": _boxes}
-            for _boxes, _labels in zip(boxes, labels)
-        ]
-
-        box_loss = torch.tensor(0.0).to(self.device)
-        batch_matches = self.matcher(preds, gts)
-        for i, (pred_i, gt_i) in enumerate(batch_matches):
-            # box loss
-            _pred_boxes = pred_boxes[i][pred_i]
-            _gt_boxes = boxes[i][gt_i]
-
-            # print(complete_box_iou_loss(_pred_boxes, _gt_boxes, reduction="sum"))
-            # box_loss += self.smoothl1(_pred_boxes, _gt_boxes)
-            box_loss += complete_box_iou_loss(_pred_boxes, _gt_boxes, reduction="sum")
-
-            # class loss
-            _pred_classes = pred_classes[i]
-            _labels = labels[i]
-
-            n_predictions, _ = _pred_classes.size()
-            batch_gts = torch.zeros(n_predictions).to(self.device).long()
-            batch_gts[pred_i] = _labels[gt_i]
-
-            _class_loss = self.cls_loss(
-                _pred_classes.to(self.device), batch_gts.to(self.device)
-            )
-
-            pos_ind = batch_gts != 0
-            pos_loss = _class_loss[pos_ind]
-            _class_loss[batch_gts != 0] = 0
-            neg_loss, _ = torch.sort(_class_loss, descending=True)
-            neg_loss = neg_loss[: pos_ind.sum() * self.pos_neg_ratio]
-
-            class_loss += (pos_loss.sum() + neg_loss.sum()) / pos_ind.sum()
-
-        box_loss /= batch_size
-        class_loss /= batch_size
-        return box_loss, class_loss
+        return pred_logits, image_class_embeds, query_embeds
 
 
 class OwlViT(torch.nn.Module):
@@ -211,38 +52,25 @@ class OwlViT(torch.nn.Module):
     classifier to filter noise.
     """
 
-    def __init__(self, num_classes, width=768):
+    def __init__(self, pretrained_model, query_bank):
         super().__init__()
 
-        model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
-        self.backbone = model.owlvit.vision_model
-        self.layernorm = model.layer_norm
-        self.post_layernorm = model.owlvit.vision_model.post_layernorm
-
-        # for name, parameter in self.backbone.named_parameters():
-        #     if "layernorm" not in name:
-        #         parameter.requires_grad = False
-
-        for parameter in self.backbone.parameters():
-            parameter.requires_grad = False
-
-        for parameter in self.post_layernorm.parameters():
-            parameter.requires_grad = False
-
-        self.box_head = model.box_head
-        self.compute_box_bias = model.compute_box_bias
-        self.sigmoid = model.sigmoid
-        del model
-
-        self.cls_head = torch.nn.Sequential(
-            torch.nn.Linear(width, width),
-            torch.nn.Tanh(),
-            torch.nn.Linear(width, width),
-            torch.nn.Tanh(),
-            torch.nn.Linear(width, width),
-            torch.nn.Tanh(),
-            torch.nn.Linear(width, num_classes),
+        # Take the pretrained components that are useful to us
+        # pretrained_model.class_head = PatchedOwlViTClassPredictionHead(
+        #     pretrained_model.class_head
+        # )
+        self.backbone = pretrained_model.owlvit.vision_model
+        self.layernorm = pretrained_model.layer_norm
+        self.post_layernorm = pretrained_model.owlvit.vision_model.post_layernorm
+        self.class_predictor = PatchedOwlViTClassPredictionHead(
+            pretrained_model.class_head
         )
+        # self.class_predictor = pretrained_model.class_predictor
+        self.box_head = pretrained_model.box_head
+        self.compute_box_bias = pretrained_model.compute_box_bias
+        self.sigmoid = pretrained_model.sigmoid
+
+        self.queries = torch.nn.Parameter(query_bank, requires_grad=True)
 
     # Copied from transformers.models.clip.modeling_owlvit.OwlViTForObjectDetection.box_predictor
     # Removed some comments and docstring to clear up clutter for now
@@ -279,7 +107,11 @@ class OwlViT(torch.nn.Module):
 
         return image_embeds
 
-    def forward(self, image: torch.Tensor, return_with_embeddings=False):
+    def forward(
+        self,
+        image: torch.Tensor,
+        return_with_embeddings=False,
+    ):
         # Same naming convention as image_guided_detection
         feature_map = self.image_embedder(image)
         new_size = (
@@ -293,13 +125,21 @@ class OwlViT(torch.nn.Module):
         # Box predictions
         pred_boxes = self.box_predictor(image_feats, feature_map)
 
-        # New class head that works off image_feats instead of feature_map
-        pred_classes = self.cls_head(image_feats)
-
         if return_with_embeddings:
-            return pred_boxes, pred_classes, image_feats
+            return pred_boxes, image_feats
 
-        return pred_boxes, pred_classes
+        # TODO: monkey patch class head to not use in place ops so I don't have to clone
+        (
+            pred_class_logits,
+            image_embeds_normalized,
+            query_embeds_normalized,
+        ) = self.class_predictor(image_feats, self.queries)
+
+        sims = torch.matmul(
+            query_embeds_normalized.squeeze(0), image_embeds_normalized.squeeze(0).t()
+        ).t()
+
+        return pred_boxes, pred_class_logits, sims.unsqueeze(0)
 
 
 class PostProcess:
@@ -330,3 +170,37 @@ class PostProcess:
         scores = scores[idx]
 
         return pred_boxes.unsqueeze_(0), classes.unsqueeze_(0), scores.unsqueeze_(0)
+
+
+def load_model(labelmap, device, freeze_last_backbone_layer=True):
+    _model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
+    _processor = AutoProcessor.from_pretrained("google/owlvit-base-patch32")
+
+    print("Initializing priors from labels...")
+    inputs = _processor(
+        text=[list(labelmap.values())],
+        images=Image.new("RGB", (224, 224)),
+        return_tensors="pt",
+    )
+
+    with torch.no_grad():
+        queries = _model(**inputs).text_embeds
+
+    patched_model = OwlViT(pretrained_model=_model, query_bank=queries)
+
+    for name, parameter in patched_model.backbone.named_parameters():
+        # Freeze all layers in vision encoder except last layer
+        if not freeze_last_backbone_layer and ".11." in name:
+            continue
+
+        parameter.requires_grad = False
+
+    for parameter in patched_model.box_head.parameters():
+        parameter.requires_grad = False
+
+    print("\nTrainable parameters:")
+    for name, parameter in patched_model.named_parameters():
+        if parameter.requires_grad:
+            print(name)
+
+    return patched_model.to(device)

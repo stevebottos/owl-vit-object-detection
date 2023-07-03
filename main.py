@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from data.dataset import get_dataloaders
 from losses import get_criterion
-from models import FocalBoxLoss, OwlViT, PostProcess
+from models import load_model, PostProcess
 from util import BoxUtil, GeneralLossAccumulator, TensorboardLossAccumulator
 
 
@@ -63,22 +63,34 @@ def labels_to_classnames(pred_classes, classmap):
 
 
 if __name__ == "__main__":
+    try:
+        import shutil
+
+        shutil.rmtree("debug")
+        shutil.rmtree("logs")
+    except:
+        ...
+
     training_cfg = get_training_config()
     train_dataloader, test_dataloader, train_labelcounts = get_dataloaders()
-
-    labelmap = train_dataloader.dataset.labelmap
-    classmap = reverse_labelmap(labelmap)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = OwlViT(num_classes=len(labelmap) + 1).to(device)
-    # criterion = FocalBoxLoss(device, train_labelcounts)
-    criterion = get_criterion(num_classes=len(labelmap)).to(device)
+
+    classmap = reverse_labelmap(train_dataloader.dataset.labelmap)
+    labelmap = {
+        k: v["name"] for k, v in classmap.items()
+    }  # for more generic use later on when I generalize to non-coco stuff, as {idx: classname}
+    labelmap.update({len(labelmap): "noise"})
+
+    model = load_model(labelmap, device)
+    postprocess = PostProcess(confidence_threshold=0.5, iou_threshold=0.2)
+
+    criterion = get_criterion(num_classes=len(classmap)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
-    postprocess = PostProcess(confidence_threshold=0.95)
 
     model.train()
+    torch.autograd.set_detect_anomaly(True)
     for epoch in range(training_cfg["n_epochs"]):
         if training_cfg["save_debug_images"]:
-            os.makedirs(f"debug/{epoch}/train", exist_ok=True)
             os.makedirs(f"debug/{epoch}/eval", exist_ok=True)
 
         # Train loop
@@ -98,9 +110,13 @@ if __name__ == "__main__":
             boxes = coco_to_model_input(boxes, metadata).to(device)
 
             # Predict
-            all_pred_boxes, pred_classes = model(image)
+            all_pred_boxes, pred_classes, similarities = model(image)
 
-            preds = {"pred_logits": pred_classes, "pred_boxes": all_pred_boxes}
+            # TODO: Use pred_classes or logits in loss?
+            preds = {
+                "pred_logits": pred_classes,  # pred_classes,
+                "pred_boxes": all_pred_boxes,
+            }
             gts = [
                 {"labels": _labels, "boxes": _boxes}
                 for _boxes, _labels in zip(boxes, labels)
@@ -138,7 +154,7 @@ if __name__ == "__main__":
                 boxes = coco_to_model_input(boxes, metadata).to(device)
 
                 # Get predictions and save output
-                pred_boxes, pred_classes, scores = postprocess(*model(image))
+                pred_boxes, pred_classes, scores = postprocess(*model(image)[:-1])
                 pred_boxes = pred_boxes.cpu()
 
                 pred_classes_with_names = labels_to_classnames(pred_classes, classmap)
