@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -173,6 +175,8 @@ class PostProcess:
 
 
 def load_model(labelmap, device, freeze_last_backbone_layer=True):
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
     _model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
     _processor = AutoProcessor.from_pretrained("google/owlvit-base-patch32")
 
@@ -198,9 +202,9 @@ def load_model(labelmap, device, freeze_last_backbone_layer=True):
     for parameter in patched_model.box_head.parameters():
         parameter.requires_grad = False
 
-    print("\nTrainable parameters:")
+    print("Trainable parameters:")
     for name, parameter in patched_model.named_parameters():
         if parameter.requires_grad:
-            print(name)
+            print(f"  {name}")
 
     return patched_model.to(device)

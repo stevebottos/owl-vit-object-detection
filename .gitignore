@@ -4,5 +4,6 @@
 datasets/
 debug/
 logs/
-data/*.json
+data/*
+!data/.gitkeep
 scratch.py
