@@ -72,7 +72,7 @@ class OwlViT(torch.nn.Module):
         self.compute_box_bias = pretrained_model.compute_box_bias
         self.sigmoid = pretrained_model.sigmoid
 
-        self.queries = torch.nn.Parameter(query_bank, requires_grad=False)
+        self.queries = torch.nn.Parameter(query_bank, requires_grad=True)
 
     # Copied from transformers.models.clip.modeling_owlvit.OwlViTForObjectDetection.box_predictor
     # Removed some comments and docstring to clear up clutter for now

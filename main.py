@@ -85,7 +85,7 @@ if __name__ == "__main__":
 
     criterion = get_criterion(num_classes=len(classmap)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
-    optimizer = torch.optim.SGD(model.parameters(), lr=3e-4)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=3e-4)
 
     model.train()
     torch.autograd.set_detect_anomaly(True)
