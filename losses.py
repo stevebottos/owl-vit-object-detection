@@ -347,7 +347,7 @@ class SetCriterion(nn.Module):
         return losses, metadata
 
 
-def get_criterion(num_classes, class_loss_mode):
+def get_criterion(num_classes, class_loss_mode="logits"):
     weight_dict = {
         "loss_ce": 1,
         "loss_giou": 2,
