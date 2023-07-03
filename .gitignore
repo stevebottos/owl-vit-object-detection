@@ -7,3 +7,4 @@ logs/
 data/*
 !data/.gitkeep
 scratch.py
+notes
