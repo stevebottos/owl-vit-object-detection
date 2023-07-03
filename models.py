@@ -189,14 +189,16 @@ class OwlViT(torch.nn.Module):
         super().__init__()
 
         # Take the pretrained components that are useful to us
-        pretrained_model.class_head = PatchedOwlViTClassPredictionHead(
-            pretrained_model.class_head
-        )
+        # pretrained_model.class_head = PatchedOwlViTClassPredictionHead(
+        #     pretrained_model.class_head
+        # )
         self.backbone = pretrained_model.owlvit.vision_model
         self.layernorm = pretrained_model.layer_norm
         self.post_layernorm = pretrained_model.owlvit.vision_model.post_layernorm
-        self.class_head = pretrained_model.class_head
-        self.class_predictor = pretrained_model.class_predictor
+        self.class_predictor = PatchedOwlViTClassPredictionHead(
+            pretrained_model.class_head
+        )
+        # self.class_predictor = pretrained_model.class_predictor
         self.box_head = pretrained_model.box_head
         self.compute_box_bias = pretrained_model.compute_box_bias
         self.sigmoid = pretrained_model.sigmoid
@@ -261,7 +263,7 @@ class OwlViT(torch.nn.Module):
 
         # TODO: monkey patch class head to not use in place ops so I don't have to clone
         pred_class_logits, image_embeds = self.class_predictor(
-            image_feats=image_feats, query_embeds=self.queries
+            image_feats, self.queries
         )
 
         # TODO: Use these similarities and cosine loss

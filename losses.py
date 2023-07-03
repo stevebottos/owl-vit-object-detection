@@ -245,22 +245,42 @@ class SetCriterion(nn.Module):
 
         return losses, metadata
 
-    # Unused by Owl-VIT currently
-    # @torch.no_grad()
-    # def loss_cardinality(self, outputs, targets, indices, num_boxes):
-    #     """Compute the cardinality error, ie the absolute error in the number of predicted non-empty boxes
-    #     This is not really a loss, it is intended for logging purposes only. It doesn't propagate gradients
-    #     """
-    #     pred_logits = outputs["pred_logits"]
-    #     device = pred_logits.device
-    #     tgt_lengths = torch.as_tensor(
-    #         [len(v["labels"]) for v in targets], device=device
+    # Cosine version
+    # def loss_labels(self, outputs, targets, indices, _, log=False):
+    #     assert "pred_logits" in outputs
+    #     src_logits = outputs["pred_logits"]
+
+    #     idx = self._get_src_permutation_idx(indices)
+
+    #     target_classes_o = torch.cat(
+    #         [t["labels"][J] for t, (_, J) in zip(targets, indices)]
     #     )
-    #     # Count the number of predictions that are NOT "no-object" (which is the last class)
-    #     card_pred = (pred_logits.argmax(-1) != pred_logits.shape[-1] - 1).sum(1)
-    #     card_err = F.l1_loss(card_pred.float(), tgt_lengths.float())
-    #     losses = {"cardinality_error": card_err}
-    #     return losses
+    #     target_classes = torch.full(
+    #         src_logits.shape[:2],
+    #         self.num_classes,
+    #         dtype=torch.int64,
+    #         device=src_logits.device,
+    #     )
+    #     target_classes[idx] = target_classes_o
+
+    #     scales = torch.ones(target_classes.shape).to(target_classes.device)
+    #     scales[torch.where(target_classes == 80)] = 0.001
+
+    #     target_classes_1h = F.one_hot(target_classes, num_classes=81).float()
+
+    #     loss_ce = F.mse_loss(src_logits, target_classes_1h, reduction="none").sum(
+    #         dim=-1
+    #     )
+    #     loss_ce *= scales
+
+    #     losses = {"loss_ce": loss_ce.mean()}
+    #     metadata = {
+    #         "loss_ce": loss_ce[
+    #             torch.where(target_classes != self.num_classes)
+    #         ].tolist()  # background class is always the last class
+    #     }
+
+    #     return losses, metadata
 
     def loss_boxes(self, outputs, targets, indices, num_boxes):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
