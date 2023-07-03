@@ -114,7 +114,7 @@ if __name__ == "__main__":
 
             # TODO: Use pred_classes or logits in loss?
             preds = {
-                "pred_logits": similarities,  # pred_classes,
+                "pred_logits": pred_classes,  # pred_classes,
                 "pred_boxes": all_pred_boxes,
             }
             gts = [
