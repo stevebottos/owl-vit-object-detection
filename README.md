@@ -2,8 +2,12 @@
 # TODO
 - [x] **Introduce a learnable query bank.** The original Owl-VIT model is multi-modal, taking an image and a prompt as input. Now, the model computes a set of initial queries based on the labels provided which become a parameter of the model. The queries are injected during each forward pass, optimal queries for each class are learned through training. See `experiments/check_text_embeddings_as_priors.ipynb` for more details.
 - [x] **Get rid of pycocotools.** It is annoying.
+- [x] **Half precision training.** For speed.
 - [ ] **Benchmarks.** Do some benchmarking writeups.
 - [ ] **Improve model.** Currently, while the model is functional, it isn't optimal. There seem to be some issues due to the fact that a ton of boxes end up clustered around the object of interest (see `experiments/check_zero_shot_results.ipynb`) that the model is having trouble learning through but this requires more investigation.
+- [ ] **Batching.** Everything right now only works with batchsize of 1. Eventually I'll generalize to any batchsize
+- [ ] **More ViT Backbones.** There are others available that may improve results
+
 
 # Motivation
 Models like CLIP and Owl-VIT are interesting to me because of the massive amount of data that they've been trained on. CLIP's usefulness in the scope of computer vision is limited since it can only handle classification. The ability for Owl-VIT to localize unseen objects extremely well in image-guided one/few shot tasks is impressive, but it still relies on the presence of a query. The idea in this repo is to repurpose Owl-VIT for a traditional object detection task, since its massive pre-training should (hopefully) allow the model to produce good results with much less data than you'd typically need.
