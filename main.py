@@ -13,6 +13,7 @@ from data.dataset import get_dataloaders
 from losses import get_criterion
 from models import load_model, PostProcess
 from util import BoxUtil, GeneralLossAccumulator, TensorboardLossAccumulator
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
 
 def get_training_config():
