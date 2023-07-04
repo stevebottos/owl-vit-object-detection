@@ -174,7 +174,7 @@ class PostProcess:
         return pred_boxes.unsqueeze_(0), classes.unsqueeze_(0), scores.unsqueeze_(0)
 
 
-def load_model(labelmap, device, freeze_last_backbone_layer=True):
+def load_model(labelmap, device, freeze_last_backbone_layer=True, freeze_box_head=True):
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
     _model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
@@ -199,12 +199,13 @@ def load_model(labelmap, device, freeze_last_backbone_layer=True):
 
         parameter.requires_grad = False
 
-    for parameter in patched_model.box_head.parameters():
-        parameter.requires_grad = False
+    if not freeze_box_head:
+        for parameter in patched_model.box_head.parameters():
+            parameter.requires_grad = True
 
     print("Trainable parameters:")
     for name, parameter in patched_model.named_parameters():
         if parameter.requires_grad:
             print(f"  {name}")
-
+    print()
     return patched_model.to(device)

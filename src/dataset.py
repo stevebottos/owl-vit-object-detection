@@ -85,17 +85,11 @@ def get_dataloaders(
     with open(LABELMAP_FILE) as f:
         labelmap = json.load(f)
 
-    noise_key = len(labelmap)
-    labelmap.update({noise_key: "noise"})
-
-    # 768 "anchors" predicted per image
-    rough_num_background_instances = {noise_key: len(train_dataset) * 768}
-
     train_labelcounts = Counter()
     for i in range(len(train_dataset)):
         train_labelcounts.update(train_dataset.load_target(i)[0])
 
-    train_labelcounts.update(rough_num_background_instances)
+    # train_labelcounts.update(rough_num_background_instances)
 
     # scales must be in order
     scales = []
@@ -103,8 +97,8 @@ def get_dataloaders(
         scales.append(train_labelcounts[i])
 
     scales = np.array(scales)
+    scales = (np.round(np.log(scales.max() / scales) + 1, 1)).tolist()
 
-    scales = (np.log(scales.max() / scales) + 0.01).tolist()
     train_labelcounts = {}
     train_dataloader = DataLoader(
         train_dataset, batch_size=1, shuffle=True, num_workers=4
@@ -112,6 +106,11 @@ def get_dataloaders(
     test_dataloader = DataLoader(
         test_dataset, batch_size=1, shuffle=False, num_workers=4
     )
+
+    # Update the background with default weight of 0.01
+    noise_key = len(labelmap)
+    labelmap.update({noise_key: "noise"})
+    scales.append(0.01)
 
     return train_dataloader, test_dataloader, scales, labelmap
 

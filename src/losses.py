@@ -354,8 +354,8 @@ class SetCriterion(nn.Module):
 def get_criterion(num_classes, class_weights=None, class_loss_mode="logits"):
     weight_dict = {
         "loss_ce": 1,
-        "loss_giou": 2,
-        "loss_bbox": 5,
+        "loss_giou": 1,
+        "loss_bbox": 1,
     }  # defaults from detr code
 
     matcher = HungarianMatcher()

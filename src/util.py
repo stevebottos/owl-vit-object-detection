@@ -2,6 +2,7 @@ from collections import defaultdict
 from typing import Dict
 
 import numpy as np
+from tabulate import tabulate
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.io import read_image
@@ -42,11 +43,48 @@ class GeneralLossAccumulator:
     def get_values(self):
         averaged = {}
         for k, v in self.loss_values.items():
-            averaged[k] = v / self.n
+            averaged[k] = round(v / self.n, 5)
         return averaged
 
     def reset(self):
         self.value = 0
+
+
+class ProgressFormatter:
+    def __init__(self):
+        self.table = {
+            "epoch": [],
+            "class loss": [],
+            "box loss": [],
+            "map@0.5": [],
+            "map (S/M/L)": [],
+            "mar (S/M/L)": [],
+        }
+
+    def update(self, epoch, train_metrics, val_metrics):
+        self.table["epoch"].append(epoch)
+        self.table["class loss"].append(train_metrics["loss_ce"])
+        self.table["box loss"].append(
+            train_metrics["loss_bbox"] + train_metrics["loss_giou"]
+        )
+        self.table["map@0.5"].append(round(val_metrics["map_50"].item(), 3))
+
+        map_s = round(val_metrics["map_small"].item(), 2)
+        map_m = round(val_metrics["map_medium"].item(), 2)
+        map_l = round(val_metrics["map_large"].item(), 2)
+
+        self.table["map (S/M/L)"].append(f"{map_s}/{map_m}/{map_l}")
+
+        mar_s = round(val_metrics["mar_small"].item(), 2)
+        mar_m = round(val_metrics["mar_medium"].item(), 2)
+        mar_l = round(val_metrics["mar_large"].item(), 2)
+
+        self.table["mar (S/M/L)"].append(f"{mar_s}/{mar_m}/{mar_l}")
+
+    def print(self):
+        print()
+        print(tabulate(self.table, headers="keys"))
+        print()
 
 
 class BoxUtil:
@@ -77,12 +115,15 @@ class BoxUtil:
     ):
         if isinstance(image, str):
             image = read_image(image)
-
         if labels_batch is None:
             for _boxes in boxes_batch:
+                if not len(_boxes):
+                    continue
                 image = draw_bounding_boxes(image, _boxes, width=2)
         else:
             for _boxes, _labels in zip(boxes_batch, labels_batch):
+                if not len(_boxes):
+                    continue
                 image = draw_bounding_boxes(image, _boxes, _labels, width=2)
         return image
 

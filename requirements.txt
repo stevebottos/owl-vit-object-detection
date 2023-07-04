@@ -5,3 +5,4 @@ umap-learn
 plotly
 pandas
 nbformat
+tabulate

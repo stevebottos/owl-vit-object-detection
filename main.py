@@ -9,7 +9,13 @@ from tqdm import tqdm
 from src.dataset import get_dataloaders
 from src.losses import get_criterion
 from src.models import PostProcess, load_model
-from src.util import BoxUtil, GeneralLossAccumulator, TensorboardLossAccumulator
+from src.util import (
+    BoxUtil,
+    GeneralLossAccumulator,
+    TensorboardLossAccumulator,
+    ProgressFormatter,
+)
+import numpy as np
 
 
 def get_training_config():
@@ -82,6 +88,14 @@ def update_metrics(metric, metadata, pred_boxes, pred_classes, scores, boxes, la
 
 
 if __name__ == "__main__":
+    USE_CLASS_WEIGHT = True
+    CLASS_LOSS_MODE = "logits"  # logits (default) | similarities (experimental)
+    CONFIDENCE_THRESHOLD = 0.5
+    IOU_THRESHOLD = 0.1
+    LEARNING_RATE = 3e-4
+    FREEZE_LAST_BACKBONE_LAYER = True
+    FREEZE_BOX_HEAD = True
+
     try:
         import shutil
 
@@ -93,23 +107,39 @@ if __name__ == "__main__":
     training_cfg = get_training_config()
     train_dataloader, test_dataloader, scales, labelmap = get_dataloaders()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    criterion = get_criterion(num_classes=len(labelmap) - 1).to(device)
 
-    model = load_model(labelmap, device)
-    postprocess = PostProcess(confidence_threshold=0.5, iou_threshold=0.1)
+    model = load_model(
+        labelmap,
+        device,
+        freeze_last_backbone_layer=FREEZE_LAST_BACKBONE_LAYER,
+        freeze_box_head=FREEZE_BOX_HEAD,
+    )
+
+    postprocess = PostProcess(
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        iou_threshold=IOU_THRESHOLD,
+    )
+
+    criterion = get_criterion(
+        num_classes=len(labelmap) - 1,
+        class_weights=scales if USE_CLASS_WEIGHT else None,
+        class_loss_mode=CLASS_LOSS_MODE,
+    ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
-    metric = MeanAveragePrecision(iou_type="bbox").to(device)
-    scaler = torch.cuda.amp.GradScaler()
 
+    metric = MeanAveragePrecision(iou_type="bbox", class_metrics=False).to(device)
+    scaler = torch.cuda.amp.GradScaler()
+    general_loss = GeneralLossAccumulator()
+    tensorboard_finegrained_loss = TensorboardLossAccumulator(log_dir="logs")
+    progress_summary = ProgressFormatter()
     model.train()
     for epoch in range(training_cfg["n_epochs"]):
+        np.save(f"{epoch}.npy", model.queries.detach().cpu().numpy())
         if training_cfg["save_debug_images"]:
             os.makedirs(f"debug/{epoch}/eval", exist_ok=True)
 
         # Train loop
-        general_loss = GeneralLossAccumulator()
-        tensorboard_finegrained_loss = TensorboardLossAccumulator(log_dir="logs")
         for i, (image, labels, boxes, metadata) in enumerate(
             tqdm(train_dataloader, ncols=60)
         ):
@@ -123,36 +153,32 @@ if __name__ == "__main__":
             with torch.cuda.amp.autocast():
                 # Predict
                 all_pred_boxes, pred_classes, similarities = model(image)
-
-                preds = {
-                    "pred_logits": pred_classes,  # pred_classes,
-                    "pred_boxes": all_pred_boxes,
-                }
-                gts = [
-                    {"labels": _labels, "boxes": _boxes}
-                    for _boxes, _labels in zip(boxes, labels)
-                ]
-
-                losses, metalosses = criterion(preds, gts)
+                losses, metalosses = criterion(
+                    {
+                        "pred_logits": pred_classes,
+                        "pred_boxes": all_pred_boxes,
+                    },
+                    [
+                        {"labels": _labels, "boxes": _boxes}
+                        for _boxes, _labels in zip(boxes, labels)
+                    ],
+                )
 
             loss = losses["loss_ce"] + losses["loss_bbox"] + losses["loss_giou"]
-            # loss.backward()
             scaler.scale(loss).backward()
-            # optimizer.step()
             scaler.step(optimizer)
             scaler.update()
-            # Update accumulators
+
             general_loss.update(losses)
             tensorboard_finegrained_loss.update(
                 labels_to_classnames(labels, labelmap).pop(), metalosses["loss_ce"]
             )
 
         tensorboard_finegrained_loss.write(epoch)
-        print(*general_loss.get_values().items(), sep="\n")
+        train_metrics = general_loss.get_values()
         general_loss.reset()
 
         # Eval loop
-        results = []
         model.eval()
         with torch.no_grad():
             for i, (image, labels, boxes, metadata) in enumerate(
@@ -186,5 +212,7 @@ if __name__ == "__main__":
                     write_png(image_with_boxes, f"debug/{epoch}/eval/{i}.jpg")
 
         print("Computing metrics...")
-        result = metric.compute()
-        print(*result.items(), sep="\n")
+        val_metrics = metric.compute()
+        metric.reset()
+        progress_summary.update(epoch, train_metrics, val_metrics)
+        progress_summary.print()

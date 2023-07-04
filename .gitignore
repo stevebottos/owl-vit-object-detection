@@ -8,3 +8,4 @@ data/*
 !data/.gitkeep
 scratch.py
 notes
+querybank.ipynb
