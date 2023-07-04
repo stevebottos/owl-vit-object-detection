@@ -244,6 +244,8 @@ class SetCriterion(nn.Module):
                 reduction="none",
             )
 
+        # loss_ce = torch.pow(loss_ce, 2)  # similar to focal loss with gamma=2
+
         losses = {"loss_ce": loss_ce.sum()}
 
         metadata = {

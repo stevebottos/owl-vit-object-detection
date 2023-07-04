@@ -76,6 +76,7 @@ class OwlDataset(Dataset):
 def get_dataloaders(
     train_annotations_file=TRAIN_ANNOTATIONS_FILE,
     test_annotations_file=TEST_ANNOTATIONS_FILE,
+    background_downweight=0.01,
 ):
     image_processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch32")
 
@@ -107,10 +108,9 @@ def get_dataloaders(
         test_dataset, batch_size=1, shuffle=False, num_workers=4
     )
 
-    # Update the background with default weight of 0.01
     noise_key = len(labelmap)
     labelmap.update({noise_key: "noise"})
-    scales.append(0.01)
+    scales.append(background_downweight)
 
     return train_dataloader, test_dataloader, scales, labelmap
 

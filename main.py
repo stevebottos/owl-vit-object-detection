@@ -100,6 +100,7 @@ class QBLoss(torch.nn.Module):
 
 if __name__ == "__main__":
     USE_CLASS_WEIGHT = True
+    BACKGROUND_DOWNWEIGHT = 0.1  # Original is 0.01
     CLASS_LOSS_MODE = "logits"  # logits (default) | similarities (experimental)
     CONFIDENCE_THRESHOLD = 0.9
     IOU_THRESHOLD = 0.5
@@ -114,7 +115,9 @@ if __name__ == "__main__":
         ...
 
     training_cfg = get_training_config()
-    train_dataloader, test_dataloader, scales, labelmap = get_dataloaders()
+    train_dataloader, test_dataloader, scales, labelmap = get_dataloaders(
+        background_downweight=BACKGROUND_DOWNWEIGHT
+    )
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     model = load_model(
