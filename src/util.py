@@ -1,6 +1,6 @@
 from collections import defaultdict
 from typing import Dict
-
+import time
 import numpy as np
 from tabulate import tabulate
 import torch
@@ -8,6 +8,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.io import read_image
 from torchvision.ops import box_convert as _box_convert
 from torchvision.utils import draw_bounding_boxes
+from datetime import timedelta
 
 
 class TensorboardLossAccumulator:
@@ -57,9 +58,11 @@ class ProgressFormatter:
             "class loss": [],
             "box loss": [],
             "map@0.5": [],
-            "map (S/M/L)": [],
-            "mar (S/M/L)": [],
+            "map (L/M/S)": [],
+            "mar (L/M/S)": [],
+            "time elapsed": [],
         }
+        self.start = time.time()
 
     def update(self, epoch, train_metrics, val_metrics):
         self.table["epoch"].append(epoch)
@@ -73,13 +76,17 @@ class ProgressFormatter:
         map_m = round(val_metrics["map_medium"].item(), 2)
         map_l = round(val_metrics["map_large"].item(), 2)
 
-        self.table["map (S/M/L)"].append(f"{map_s}/{map_m}/{map_l}")
+        self.table["map (L/M/S)"].append(f"{map_l}/{map_m}/{map_s}")
 
         mar_s = round(val_metrics["mar_small"].item(), 2)
         mar_m = round(val_metrics["mar_medium"].item(), 2)
         mar_l = round(val_metrics["mar_large"].item(), 2)
 
-        self.table["mar (S/M/L)"].append(f"{mar_s}/{mar_m}/{mar_l}")
+        self.table["mar (L/M/S)"].append(f"{mar_l}/{mar_m}/{mar_s}")
+
+        self.table["time elapsed"].append(
+            timedelta(seconds=int(time.time() - self.start))
+        )
 
     def print(self):
         print()

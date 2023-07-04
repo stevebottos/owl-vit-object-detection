@@ -5,5 +5,5 @@ data:
   num_test_images: 200
 
 training:
-  n_epochs: 20
+  n_epochs: 50
   save_debug_images: true

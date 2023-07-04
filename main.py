@@ -87,14 +87,23 @@ def update_metrics(metric, metadata, pred_boxes, pred_classes, scores, boxes, la
     metric.update(preds, targets)
 
 
+class QBLoss(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, queries):
+        qb = queries.clone()
+        qb = qb / torch.linalg.norm(qb, dim=-1, keepdim=True, ord=2) + 1e-6
+        sims = torch.matmul(qb.squeeze(0), qb.squeeze(0).t()).t().abs()
+        return (sims.sum() - sims.trace()) / sims.trace()
+
+
 if __name__ == "__main__":
     USE_CLASS_WEIGHT = True
     CLASS_LOSS_MODE = "logits"  # logits (default) | similarities (experimental)
-    CONFIDENCE_THRESHOLD = 0.5
-    IOU_THRESHOLD = 0.1
-    LEARNING_RATE = 3e-4
-    FREEZE_LAST_BACKBONE_LAYER = True
-    FREEZE_BOX_HEAD = True
+    CONFIDENCE_THRESHOLD = 0.9
+    IOU_THRESHOLD = 0.5
+    LEARNING_RATE = 3e-6
 
     try:
         import shutil
@@ -111,10 +120,7 @@ if __name__ == "__main__":
     model = load_model(
         labelmap,
         device,
-        freeze_last_backbone_layer=FREEZE_LAST_BACKBONE_LAYER,
-        freeze_box_head=FREEZE_BOX_HEAD,
     )
-
     postprocess = PostProcess(
         confidence_threshold=CONFIDENCE_THRESHOLD,
         iou_threshold=IOU_THRESHOLD,
@@ -125,8 +131,8 @@ if __name__ == "__main__":
         class_weights=scales if USE_CLASS_WEIGHT else None,
         class_loss_mode=CLASS_LOSS_MODE,
     ).to(device)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+    qb_criterion = QBLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
     metric = MeanAveragePrecision(iou_type="bbox", class_metrics=False).to(device)
     scaler = torch.cuda.amp.GradScaler()
@@ -135,7 +141,6 @@ if __name__ == "__main__":
     progress_summary = ProgressFormatter()
     model.train()
     for epoch in range(training_cfg["n_epochs"]):
-        np.save(f"{epoch}.npy", model.queries.detach().cpu().numpy())
         if training_cfg["save_debug_images"]:
             os.makedirs(f"debug/{epoch}/eval", exist_ok=True)
 
@@ -152,7 +157,7 @@ if __name__ == "__main__":
 
             with torch.cuda.amp.autocast():
                 # Predict
-                all_pred_boxes, pred_classes, similarities = model(image)
+                all_pred_boxes, pred_classes, querybank = model(image)
                 losses, metalosses = criterion(
                     {
                         "pred_logits": pred_classes,
@@ -164,7 +169,12 @@ if __name__ == "__main__":
                     ],
                 )
 
-            loss = losses["loss_ce"] + losses["loss_bbox"] + losses["loss_giou"]
+                loss = losses["loss_ce"] + losses["loss_bbox"] + losses["loss_giou"]
+
+                if not i % 100:
+                    qb_loss = qb_criterion(querybank)
+                    loss = loss + qb_loss
+
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()

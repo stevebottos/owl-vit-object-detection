@@ -243,19 +243,8 @@ class SetCriterion(nn.Module):
                 self.class_weight,
                 reduction="none",
             )
-        elif self.class_loss_mode == "similarities":
-            # TODO: This is a WIP
-            scales = torch.ones(target_classes.shape).to(target_classes.device)
-            scales[torch.where(target_classes == 80)] = self.eos_coef
 
-            target_classes_1h = F.one_hot(target_classes, num_classes=81).float()
-
-            loss_ce = F.mse_loss(src_logits, target_classes_1h, reduction="none").sum(
-                dim=-1
-            )
-            loss_ce *= scales
-
-        losses = {"loss_ce": loss_ce.mean()}
+        losses = {"loss_ce": loss_ce.sum()}
 
         metadata = {
             "loss_ce": loss_ce[
@@ -354,8 +343,8 @@ class SetCriterion(nn.Module):
 def get_criterion(num_classes, class_weights=None, class_loss_mode="logits"):
     weight_dict = {
         "loss_ce": 1,
-        "loss_giou": 1,
-        "loss_bbox": 1,
+        "loss_giou": 2,
+        "loss_bbox": 3,
     }  # defaults from detr code
 
     matcher = HungarianMatcher()

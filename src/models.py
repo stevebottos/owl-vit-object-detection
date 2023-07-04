@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from torch.nn.functional import softmax
-from torchvision.ops import nms
+from torchvision.ops import nms, batched_nms
 from transformers import AutoProcessor, OwlViTForObjectDetection
 from transformers.image_transforms import center_to_corners_format
 
@@ -58,16 +58,11 @@ class OwlViT(torch.nn.Module):
         super().__init__()
 
         # Take the pretrained components that are useful to us
-        # pretrained_model.class_head = PatchedOwlViTClassPredictionHead(
-        #     pretrained_model.class_head
-        # )
         self.backbone = pretrained_model.owlvit.vision_model
-        self.layernorm = pretrained_model.layer_norm
-        self.post_layernorm = pretrained_model.owlvit.vision_model.post_layernorm
+        self.post_post_layernorm = pretrained_model.layer_norm
         self.class_predictor = PatchedOwlViTClassPredictionHead(
             pretrained_model.class_head
         )
-        # self.class_predictor = pretrained_model.class_predictor
         self.box_head = pretrained_model.box_head
         self.compute_box_bias = pretrained_model.compute_box_bias
         self.sigmoid = pretrained_model.sigmoid
@@ -91,13 +86,13 @@ class OwlViT(torch.nn.Module):
     def image_embedder(self, pixel_values):
         vision_outputs = self.backbone(pixel_values=pixel_values)
         last_hidden_state = vision_outputs.last_hidden_state
-        image_embeds = self.post_layernorm(last_hidden_state)
+        image_embeds = self.backbone.post_layernorm(last_hidden_state)
 
         new_size = tuple(np.array(image_embeds.shape) - np.array((0, 1, 0)))
         class_token_out = torch.broadcast_to(image_embeds[:, :1, :], new_size)
 
         image_embeds = image_embeds[:, 1:, :] * class_token_out
-        image_embeds = self.layernorm(image_embeds)
+        image_embeds = self.post_post_layernorm(image_embeds)
 
         new_size = (
             image_embeds.shape[0],
@@ -112,7 +107,6 @@ class OwlViT(torch.nn.Module):
     def forward(
         self,
         image: torch.Tensor,
-        return_with_embeddings=False,
     ):
         # Same naming convention as image_guided_detection
         feature_map = self.image_embedder(image)
@@ -127,21 +121,13 @@ class OwlViT(torch.nn.Module):
         # Box predictions
         pred_boxes = self.box_predictor(image_feats, feature_map)
 
-        if return_with_embeddings:
-            return pred_boxes, image_feats
-
-        # TODO: monkey patch class head to not use in place ops so I don't have to clone
         (
             pred_class_logits,
-            image_embeds_normalized,
+            _,
             query_embeds_normalized,
         ) = self.class_predictor(image_feats, self.queries)
 
-        sims = torch.matmul(
-            query_embeds_normalized.squeeze(0), image_embeds_normalized.squeeze(0).t()
-        ).t()
-
-        return pred_boxes, pred_class_logits, sims.unsqueeze(0)
+        return pred_boxes, pred_class_logits, query_embeds_normalized
 
 
 class PostProcess:
@@ -166,7 +152,9 @@ class PostProcess:
         pred_boxes = pred_boxes[idx]
 
         # NMS
-        idx = nms(pred_boxes, scores, iou_threshold=self.iou_threshold)
+        # idx = nms(pred_boxes, scores, iou_threshold=self.iou_threshold)
+        idx = batched_nms(pred_boxes, scores, classes, iou_threshold=self.iou_threshold)
+
         classes = classes[idx]
         pred_boxes = pred_boxes[idx]
         scores = scores[idx]
@@ -174,7 +162,7 @@ class PostProcess:
         return pred_boxes.unsqueeze_(0), classes.unsqueeze_(0), scores.unsqueeze_(0)
 
 
-def load_model(labelmap, device, freeze_last_backbone_layer=True, freeze_box_head=True):
+def load_model(labelmap, device):
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
     _model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
@@ -192,16 +180,17 @@ def load_model(labelmap, device, freeze_last_backbone_layer=True, freeze_box_hea
 
     patched_model = OwlViT(pretrained_model=_model, query_bank=queries)
 
-    for name, parameter in patched_model.backbone.named_parameters():
-        # Freeze all layers in vision encoder except last layer
-        if not freeze_last_backbone_layer and ".11." in name:
+    for name, parameter in patched_model.named_parameters():
+        if (
+            "layers.11" in name
+            or ("class_predictor" in name)
+            or ("box" in name)
+            or ("post_layernorm" in name)
+            or ("queries" in name)
+        ):
             continue
 
         parameter.requires_grad = False
-
-    if not freeze_box_head:
-        for parameter in patched_model.box_head.parameters():
-            parameter.requires_grad = True
 
     print("Trainable parameters:")
     for name, parameter in patched_model.named_parameters():
