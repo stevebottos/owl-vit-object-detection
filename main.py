@@ -16,6 +16,7 @@ from src.util import (
     ProgressFormatter,
     TensorboardLossAccumulator,
 )
+from experimental_loss import ExperimentalLoss
 
 
 def get_training_config():
@@ -118,10 +119,11 @@ if __name__ == "__main__":
         iou_threshold=IOU_THRESHOLD,
     )
 
-    criterion = get_criterion(
-        num_classes=len(labelmap) - 1,
-        class_weights=scales if USE_CLASS_WEIGHT else None,
-    ).to(device)
+    # criterion = get_criterion(
+    #     num_classes=len(labelmap) - 1,
+    #     class_weights=scales if USE_CLASS_WEIGHT else None,
+    # ).to(device)
+    criterion = ExperimentalLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 
     metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True).to(device)
@@ -150,20 +152,25 @@ if __name__ == "__main__":
 
             with torch.cuda.amp.autocast():
                 # Predict
-                all_pred_boxes, pred_classes, querybank = model(image)
-                losses, metalosses = criterion(
-                    {
-                        "pred_logits": pred_classes,
-                        "pred_boxes": all_pred_boxes,
-                    },
-                    [
-                        {"labels": _labels, "boxes": _boxes}
-                        for _boxes, _labels in zip(boxes, labels)
-                    ],
-                )
+                all_pred_boxes, pred_classes, image_feats, querybank = model(image)
+                print()
+                print(all_pred_boxes.shape)
+                print(boxes.shape)
+                pred_boxes = criterion(all_pred_boxes, boxes)
+                exit()
+                # losses, metalosses = criterion(
+                #     {
+                #         "pred_logits": pred_classes,
+                #         "pred_boxes": all_pred_boxes,
+                #     },
+                #     [
+                #         {"labels": _labels, "boxes": _boxes}
+                #         for _boxes, _labels in zip(boxes, labels)
+                #     ],
+                # )
 
-                loss = losses["loss_ce"] + losses["loss_bbox"] + losses["loss_giou"]
-
+                # loss = losses["loss_ce"] + losses["loss_bbox"] + losses["loss_giou"]
+                exit()
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -189,7 +196,8 @@ if __name__ == "__main__":
                 boxes = coco_to_model_input(boxes, metadata).to(device)
 
                 # Get predictions and save output
-                pred_boxes, pred_classes, scores = postprocess(*model(image)[:-1])
+                pred_boxes, pred_classes, _, _ = model(image)
+                pred_boxes, pred_classes, scores = postprocess(pred_boxes, pred_classes)
                 update_metrics(
                     metric,
                     metadata,
