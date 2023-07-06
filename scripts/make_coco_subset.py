@@ -157,8 +157,8 @@ if __name__ == "__main__":
         for id, fpath in test_imagemap.items():
             test[fpath] = annotations[id]
             classes.extend([new_labelmap[el["label"]] for el in annotations[id]])
-
-        print(json.dumps(OrderedDict(Counter(classes).most_common()), indent=2))
+        classcounts = OrderedDict(Counter(classes).most_common())
+        print(json.dumps(classcounts, indent=2))
         accept = input("accept? (y/n) >")
 
         if accept == "y":
@@ -186,6 +186,9 @@ if __name__ == "__main__":
 
     with open("data/test.json", "w") as f:
         json.dump(test, f)
+
+    with open("data/counts.json", "w") as f:
+        json.dump(classcounts, f)
 
     with open("data/labelmap.json", "w") as f:
         json.dump(new_labelmap, f)

@@ -1,4 +1,5 @@
 import os
+import json
 
 import torch
 import yaml
@@ -12,10 +13,9 @@ from src.models import PostProcess, load_model
 from src.util import (
     BoxUtil,
     GeneralLossAccumulator,
-    TensorboardLossAccumulator,
     ProgressFormatter,
+    TensorboardLossAccumulator,
 )
-import numpy as np
 
 
 def get_training_config():
@@ -87,23 +87,11 @@ def update_metrics(metric, metadata, pred_boxes, pred_classes, scores, boxes, la
     metric.update(preds, targets)
 
 
-class QBLoss(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, queries):
-        qb = queries.clone()
-        qb = qb / torch.linalg.norm(qb, dim=-1, keepdim=True, ord=2) + 1e-6
-        sims = torch.matmul(qb.squeeze(0), qb.squeeze(0).t()).t().abs()
-        return (sims.sum() - sims.trace()) / sims.trace()
-
-
 if __name__ == "__main__":
     USE_CLASS_WEIGHT = True
     BACKGROUND_DOWNWEIGHT = 0.1  # Original is 0.01
-    CLASS_LOSS_MODE = "logits"  # logits (default) | similarities (experimental)
-    CONFIDENCE_THRESHOLD = 0.9
-    IOU_THRESHOLD = 0.5
+    CONFIDENCE_THRESHOLD = 0.75
+    IOU_THRESHOLD = 0.1
     LEARNING_RATE = 3e-6
 
     try:
@@ -118,6 +106,7 @@ if __name__ == "__main__":
     train_dataloader, test_dataloader, scales, labelmap = get_dataloaders(
         background_downweight=BACKGROUND_DOWNWEIGHT
     )
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     model = load_model(
@@ -132,16 +121,17 @@ if __name__ == "__main__":
     criterion = get_criterion(
         num_classes=len(labelmap) - 1,
         class_weights=scales if USE_CLASS_WEIGHT else None,
-        class_loss_mode=CLASS_LOSS_MODE,
     ).to(device)
-    qb_criterion = QBLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 
-    metric = MeanAveragePrecision(iou_type="bbox", class_metrics=False).to(device)
+    metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True).to(device)
     scaler = torch.cuda.amp.GradScaler()
     general_loss = GeneralLossAccumulator()
     tensorboard_finegrained_loss = TensorboardLossAccumulator(log_dir="logs")
     progress_summary = ProgressFormatter()
+    classMAPs = {v: [] for v in list(labelmap.values())[:-1]}
+    assert "background" not in classMAPs
+
     model.train()
     for epoch in range(training_cfg["n_epochs"]):
         if training_cfg["save_debug_images"]:
@@ -173,10 +163,6 @@ if __name__ == "__main__":
                 )
 
                 loss = losses["loss_ce"] + losses["loss_bbox"] + losses["loss_giou"]
-
-                if not i % 100:
-                    qb_loss = qb_criterion(querybank)
-                    loss = loss + qb_loss
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -213,8 +199,11 @@ if __name__ == "__main__":
                     boxes,
                     labels,
                 )
-                pred_classes_with_names = labels_to_classnames(pred_classes, labelmap)
+
                 if training_cfg["save_debug_images"]:
+                    pred_classes_with_names = labels_to_classnames(
+                        pred_classes, labelmap
+                    )
                     pred_boxes = model_output_to_image(pred_boxes.cpu(), metadata)
                     image_with_boxes = BoxUtil.draw_box_on_image(
                         metadata["impath"].pop(),
@@ -226,6 +215,15 @@ if __name__ == "__main__":
 
         print("Computing metrics...")
         val_metrics = metric.compute()
+
+        for i, p in enumerate(val_metrics["map_per_class"].tolist()):
+            label = labelmap[str(i)]
+            classMAPs[label].append(p)
+
+        # classMAPs = dict(sorted(classMAPs.items(), key=lambda x: x[-1], reverse=True))
+        with open("class_maps.json", "w") as f:
+            json.dump(classMAPs, f)
+
         metric.reset()
         progress_summary.update(epoch, train_metrics, val_metrics)
         progress_summary.print()

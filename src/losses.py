@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from torch import nn
 from torchvision.ops import box_area
+import torch.nn.functional as F
 
 
 def is_dist_avail_and_initialized():
@@ -234,17 +235,21 @@ class SetCriterion(nn.Module):
             dtype=torch.int64,
             device=src_logits.device,
         )
-        target_classes[idx] = target_classes_o
 
+        target_classes[idx] = target_classes_o
+        src_logits = src_logits.transpose(1, 2)
         if self.class_loss_mode == "logits":
             loss_ce = F.cross_entropy(
-                src_logits.transpose(1, 2),
+                src_logits,
                 target_classes,
                 self.class_weight,
                 reduction="none",
             )
 
-        # loss_ce = torch.pow(loss_ce, 2)  # similar to focal loss with gamma=2
+        # NOTE: Experimental.
+        loss_ce = (
+            torch.pow(1 - torch.exp(-loss_ce), 2) * loss_ce
+        )  # Focal loss without the alpha since that's taken care of in scaled cross entropy
 
         losses = {"loss_ce": loss_ce.sum()}
 
@@ -345,8 +350,8 @@ class SetCriterion(nn.Module):
 def get_criterion(num_classes, class_weights=None, class_loss_mode="logits"):
     weight_dict = {
         "loss_ce": 1,
-        "loss_giou": 2,
-        "loss_bbox": 3,
+        "loss_giou": 1,
+        "loss_bbox": 1,
     }  # defaults from detr code
 
     matcher = HungarianMatcher()
