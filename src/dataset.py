@@ -76,7 +76,6 @@ class OwlDataset(Dataset):
 def get_dataloaders(
     train_annotations_file=TRAIN_ANNOTATIONS_FILE,
     test_annotations_file=TEST_ANNOTATIONS_FILE,
-    background_downweight=0.01,
 ):
     image_processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch32")
 
@@ -89,8 +88,6 @@ def get_dataloaders(
     train_labelcounts = Counter()
     for i in range(len(train_dataset)):
         train_labelcounts.update(train_dataset.load_target(i)[0])
-
-    # train_labelcounts.update(rough_num_background_instances)
 
     # scales must be in order
     scales = []
@@ -108,17 +105,4 @@ def get_dataloaders(
         test_dataset, batch_size=1, shuffle=False, num_workers=4
     )
 
-    noise_key = len(labelmap)
-    labelmap.update({noise_key: "background"})
-    scales.append(background_downweight)
-
     return train_dataloader, test_dataloader, scales, labelmap
-
-
-if __name__ == "__main__":
-    train_dataloader, test_dataloader, _, _ = get_dataloaders()
-
-    print(train_dataloader)
-    for i in train_dataloader:
-        print(i)
-        exit()

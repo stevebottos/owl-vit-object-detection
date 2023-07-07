@@ -5,5 +5,11 @@ data:
   num_test_images: 200
 
 training:
-  n_epochs: 50
-  save_debug_images: true
+  n_epochs: 10
+  learning_rate: 3e-6  # Keep very low
+  save_eval_images: true
+  use_class_weight: true 
+  weight_decay: 0.1  # default
+  confidence_threshold: 0.5  # This can be quite low and still achieve good results
+  iou_threshold: 0.5  # For nms
+  

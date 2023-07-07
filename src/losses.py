@@ -1,47 +1,7 @@
-# Took a lot of stuff from https://github.com/facebookresearch/detr
-# and made some minor tweaks
-
 import torch
-import torch.distributed as dist
-import torch.nn as nn
-import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
-from torch import nn
 from torchvision.ops import box_area
-import torch.nn.functional as F
-
-
-def is_dist_avail_and_initialized():
-    if not dist.is_available():
-        return False
-    if not dist.is_initialized():
-        return False
-    return True
-
-
-def get_world_size():
-    if not is_dist_avail_and_initialized():
-        return 1
-    return dist.get_world_size()
-
-
-@torch.no_grad()
-def accuracy(output, target, topk=(1,)):
-    """Computes the precision@k for the specified values of k"""
-    if target.numel() == 0:
-        return [torch.zeros([], device=output.device)]
-    maxk = max(topk)
-    batch_size = target.size(0)
-
-    _, pred = output.topk(maxk, 1, True, True)
-    pred = pred.t()
-    correct = pred.eq(target.view(1, -1).expand_as(pred))
-
-    res = []
-    for k in topk:
-        correct_k = correct[:k].view(-1).float().sum(0)
-        res.append(correct_k.mul_(100.0 / batch_size))
-    return res
+import numpy as np
 
 
 # modified from torchvision to also return the union
@@ -85,7 +45,7 @@ def generalized_box_iou(boxes1, boxes2):
 
 
 # From https://github.com/facebookresearch/detr/blob/main/models/matcher.py
-class HungarianMatcher(nn.Module):
+class HungarianMatcher(torch.nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
     For efficiency reasons, the targets don't include the no_object. Because of this, in general,
     there are more predictions than targets. In this case, we do a 1-to-1 matching of the best predictions,
@@ -171,38 +131,14 @@ class HungarianMatcher(nn.Module):
         ]
 
 
-class SetCriterion(nn.Module):
-    """This class computes the loss for DETR.
-    The process happens in two steps:
-        1) we compute hungarian assignment between ground truth boxes and the outputs of the model
-        2) we supervise each pair of matched ground-truth / prediction (supervise class and box)
-    """
-
-    def __init__(
-        self,
-        num_classes,
-        matcher,
-        weight_dict,
-        eos_coef=0.01,  # Relative classification weight of the no-object class, default is 0.1
-        losses=["labels", "boxes"],  # losses to return
-        class_weight=None,
-        class_loss_mode="logits",
-    ):
+class PushPullLoss(torch.nn.Module):
+    def __init__(self, n_classes, scales):
         super().__init__()
-        self.num_classes = num_classes
-        self.matcher = matcher
-        self.weight_dict = weight_dict
-        self.eos_coef = eos_coef
-        self.losses = losses
-        self.class_loss_mode = class_loss_mode
+        self.matcher = HungarianMatcher()
+        self.class_criterion = torch.nn.BCELoss(reduction="none", weight=scales)
 
-        if class_weight is None:
-            class_weight = torch.ones(self.num_classes + 1)
-            class_weight[-1] = self.eos_coef
-        else:
-            class_weight = torch.tensor(class_weight)
-
-        self.register_buffer("class_weight", class_weight)
+        self.n_classes = n_classes
+        self.null_class = n_classes + 1
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
@@ -212,57 +148,64 @@ class SetCriterion(nn.Module):
         src_idx = torch.cat([src for (src, _) in indices])
         return batch_idx, src_idx
 
-    def _get_tgt_permutation_idx(self, indices):
-        # permute targets following indices
-        batch_idx = torch.cat(
-            [torch.full_like(tgt, i) for i, (_, tgt) in enumerate(indices)]
-        )
-        tgt_idx = torch.cat([tgt for (_, tgt) in indices])
-        return batch_idx, tgt_idx
-
-    def loss_labels(self, outputs, targets, indices, num_boxes, log=False):
-        assert "pred_logits" in outputs
+    def class_loss(self, outputs, targets, indices):
+        """
+        Custom loss that works off of similarities
+        """
         src_logits = outputs["pred_logits"]
-
         idx = self._get_src_permutation_idx(indices)
-
         target_classes_o = torch.cat(
             [t["labels"][J] for t, (_, J) in zip(targets, indices)]
         )
         target_classes = torch.full(
             src_logits.shape[:2],
-            self.num_classes,
+            self.null_class,
             dtype=torch.int64,
             device=src_logits.device,
         )
-
         target_classes[idx] = target_classes_o
         src_logits = src_logits.transpose(1, 2)
-        if self.class_loss_mode == "logits":
-            loss_ce = F.cross_entropy(
-                src_logits,
-                target_classes,
-                self.class_weight,
-                reduction="none",
-            )
+        assert target_classes.size(0) == 1  # TODO: batches
+        target_classes.squeeze_(0)
+        src_logits.squeeze_(0)
 
-        # NOTE: Experimental.
-        loss_ce = (
-            torch.pow(1 - torch.exp(-loss_ce), 2) * loss_ce
-        )  # Focal loss without the alpha since that's taken care of in scaled cross entropy
+        pred_logits = src_logits[:, target_classes != self.null_class].t()
+        bg_logits = src_logits[:, target_classes == self.null_class].t()
+        target_classes = target_classes[target_classes != self.null_class]
 
-        losses = {"loss_ce": loss_ce.sum()}
+        # Positive loss
+        one_hot_targets = torch.nn.functional.one_hot(target_classes, self.n_classes)
+        loss = self.class_criterion(pred_logits, one_hot_targets.float())
 
-        metadata = {
-            "loss_ce": loss_ce[
-                torch.where(target_classes != self.num_classes)
-            ].tolist()  # background class is always the last class
-        }
+        # Focal loss style downweighting
+        loss = torch.pow(1 - torch.exp(-loss), 2) * loss
 
-        return losses, metadata
+        # Scale up where positive
+        loss[torch.where(one_hot_targets == 1)] *= 8
+
+        # Just a debug sanity check
+        # sims = []
+        # for i, s in enumerate(pred_logits):
+        #     # print(s[target_classes[i].item())
+        #     sims.append(s[target_classes[i]].item())
+        # print(np.round(sims, 2))
+
+        # Sum it up
+        loss = loss.sum() / loss.size(0)
+
+        # Background loss
+        bg_loss = bg_logits.sum() / bg_logits.size(0)
+
+        pos_loss = loss / 10
+        background_loss = bg_loss
+
+        return pos_loss, background_loss
 
     def loss_boxes(self, outputs, targets, indices, num_boxes):
-        """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
+        """
+        (DETR box loss)
+
+        Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
         targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
         The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
         """
@@ -273,96 +216,56 @@ class SetCriterion(nn.Module):
             [t["boxes"][i] for t, (_, i) in zip(targets, indices)], dim=0
         )
 
-        loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction="none")
+        loss_bbox = torch.nn.functional.l1_loss(
+            src_boxes, target_boxes, reduction="none"
+        )
 
-        losses = {}
         metadata = {}
 
-        losses["loss_bbox"] = loss_bbox.sum() / num_boxes
+        loss_bbox = loss_bbox.sum() / num_boxes
         metadata["loss_bbox"] = loss_bbox.tolist()
 
         loss_giou = 1 - torch.diag(generalized_box_iou(src_boxes, target_boxes))
-        losses["loss_giou"] = loss_giou.sum() / num_boxes
-        metadata["loss_giou"] = loss_bbox.tolist()
+        loss_giou = loss_giou.sum() / num_boxes
 
-        return losses, metadata
+        return loss_bbox, loss_giou
 
-    def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
-        loss_map = {
-            "labels": self.loss_labels,
-            # "cardinality": self.loss_cardinality,
-            "boxes": self.loss_boxes,
+    def forward(
+        self,
+        predicted_classes,
+        target_classes,
+        predicted_boxes,
+        target_boxes,
+    ):
+        # Format to detr style
+        in_preds = {
+            "pred_logits": predicted_classes,
+            "pred_boxes": predicted_boxes,
         }
-        assert loss in loss_map, f"do you really want to compute {loss} loss?"
 
-        return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
+        in_targets = [
+            {"labels": _labels, "boxes": _boxes}
+            for _boxes, _labels in zip(target_boxes, target_classes)
+        ]
 
-    def forward(self, outputs, targets):
-        """This performs the loss computation.
-        Parameters:
-             outputs: dict of tensors, see the output specification of the model for the format
-             targets: list of dicts, such that len(targets) == batch_size.
-                      The expected keys in each dict depends on the losses applied, see each loss' doc
-        """
-        outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
-        print(outputs_without_aux)
-        exit()
-        # Retrieve the matching between the outputs of the last layer and the targets
-        indices = self.matcher(outputs_without_aux, targets)
+        indices = self.matcher(in_preds, in_targets)
+        # Batch index is meaningless since we use a single batch
+        # batch index is like [0,0,0,1,1,1,1,1,1,2,2,2,2,3,3] ... etc depending on number of batches
+        # TODO: Generalize to more batches
+        # target_classes.squeeze_(0)
+        # predicted_classes.squeeze_(0)
 
-        # Compute the average number of target boxes accross all nodes, for normalization purposes
-        num_boxes = sum(len(t["labels"]) for t in targets)
-        num_boxes = torch.as_tensor(
-            [num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device
+        loss_class, loss_background = self.class_loss(in_preds, in_targets, indices)
+        loss_bbox, loss_giou = self.loss_boxes(
+            in_preds,
+            in_targets,
+            indices,
+            num_boxes=sum(len(t["labels"]) for t in in_targets),
         )
-        if is_dist_avail_and_initialized():
-            torch.distributed.all_reduce(num_boxes)
-        num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
-
-        # Compute all the requested losses
-        losses = {}
-        metadata = {}
-        for losstype in self.losses:
-            loss, meta = self.get_loss(losstype, outputs, targets, indices, num_boxes)
-            losses.update(loss)
-            metadata.update(meta)
-
-        # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
-        if "aux_outputs" in outputs:
-            for i, aux_outputs in enumerate(outputs["aux_outputs"]):
-                indices = self.matcher(aux_outputs, targets)
-                for loss in self.losses:
-                    if loss == "masks":
-                        # Intermediate masks losses are too costly to compute, we ignore them.
-                        continue
-                    kwargs = {}
-                    if loss == "labels":
-                        # Logging is enabled only for the last layer
-                        kwargs = {"log": False}
-                    l_dict = self.get_loss(
-                        loss, aux_outputs, targets, indices, num_boxes, **kwargs
-                    )
-                    l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
-                    losses.update(l_dict)
-
-        return losses, metadata
-
-
-def get_criterion(num_classes, class_weights=None, class_loss_mode="logits"):
-    weight_dict = {
-        "loss_ce": 1,
-        "loss_giou": 1,
-        "loss_bbox": 1,
-    }  # defaults from detr code
-
-    matcher = HungarianMatcher()
-
-    criterion = SetCriterion(
-        num_classes=num_classes,
-        matcher=matcher,
-        weight_dict=weight_dict,
-        class_loss_mode=class_loss_mode,
-        class_weight=class_weights,
-    )
-
-    return criterion
+        losses = {
+            "loss_ce": loss_class,
+            "loss_bg": loss_background,
+            "loss_bbox": loss_bbox,
+            "loss_giou": loss_giou,
+        }
+        return losses

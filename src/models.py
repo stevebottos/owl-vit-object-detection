@@ -18,9 +18,6 @@ class PatchedOwlViTClassPredictionHead(nn.Module):
         self.query_dim = original_cls_head.query_dim
 
         self.dense0 = original_cls_head.dense0
-        self.logit_shift = original_cls_head.logit_shift
-        self.logit_scale = original_cls_head.logit_scale
-        self.elu = original_cls_head.elu
 
     def forward(self, image_embeds, query_embeds):
         image_class_embeds = self.dense0(image_embeds)
@@ -33,18 +30,9 @@ class PatchedOwlViTClassPredictionHead(nn.Module):
             query_embeds / torch.linalg.norm(query_embeds, dim=-1, keepdim=True) + 1e-6
         )
 
-        # Get class predictions
-        pred_logits = torch.einsum(
-            "...pd,...qd->...pq", image_class_embeds, query_embeds
-        )
+        pred_sims = torch.bmm(image_class_embeds, query_embeds.transpose(1, 2))
 
-        # Apply a learnable shift and scale to logits
-        logit_shift = self.logit_shift(image_embeds)
-        logit_scale = self.logit_scale(image_embeds)
-        logit_scale = self.elu(logit_scale) + 1
-        pred_logits = (pred_logits + logit_shift) * logit_scale
-
-        return pred_logits, image_class_embeds, query_embeds
+        return None, abs(pred_sims)
 
 
 class OwlViT(torch.nn.Module):
@@ -121,13 +109,11 @@ class OwlViT(torch.nn.Module):
         # Box predictions
         pred_boxes = self.box_predictor(image_feats, feature_map)
 
-        (
-            pred_class_logits,
-            _,
-            query_embeds_normalized,
-        ) = self.class_predictor(image_feats, self.queries)
+        pred_class_logits, pred_class_sims = self.class_predictor(
+            image_feats, self.queries
+        )
 
-        return pred_boxes, pred_class_logits, query_embeds_normalized
+        return (pred_boxes, pred_class_logits, pred_class_sims, None)
 
 
 class PostProcess:
@@ -140,21 +126,18 @@ class PostProcess:
         pred_boxes = all_pred_boxes.squeeze(0)
         pred_classes = pred_classes.squeeze(0)
 
-        scores = softmax(pred_classes, dim=-1)[:, :-1]
-        top = torch.max(scores, dim=1)
+        # np.savetxt("x.txt", pred_classes.tolist(), fmt="%.2f")
+
+        top = torch.max(pred_classes, dim=1)
         scores = top.values
         classes = top.indices
 
         idx = scores > self.confidence_threshold
-
         scores = scores[idx]
         classes = classes[idx]
         pred_boxes = pred_boxes[idx]
 
-        # NMS
-        # idx = nms(pred_boxes, scores, iou_threshold=self.iou_threshold)
         idx = batched_nms(pred_boxes, scores, classes, iou_threshold=self.iou_threshold)
-
         classes = classes[idx]
         pred_boxes = pred_boxes[idx]
         scores = scores[idx]
@@ -183,9 +166,9 @@ def load_model(labelmap, device):
     for name, parameter in patched_model.named_parameters():
         if (
             "layers.11" in name
-            or ("class_predictor" in name)
             or ("box" in name)
             or ("post_layernorm" in name)
+            or ("class_predictor" in name)
             or ("queries" in name)
         ):
             continue
