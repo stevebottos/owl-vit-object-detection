@@ -178,10 +178,10 @@ class PushPullLoss(torch.nn.Module):
         loss = self.class_criterion(pred_logits, one_hot_targets.float())
 
         # Scale up where positive
-        loss[torch.where(one_hot_targets == 1)] *= 10
+        loss[torch.where(one_hot_targets == 1)] *= 20
 
         # Focal loss style downweighting
-        loss = torch.pow(1 - torch.exp(-loss), 2) * loss
+        cls_loss = (torch.pow(1 - torch.exp(-loss), 2) * loss).sum() / loss.size(0)
 
         # Just a debug sanity check
         # sims = []
@@ -190,16 +190,10 @@ class PushPullLoss(torch.nn.Module):
         #     sims.append(s[target_classes[i]].item())
         # print(np.round(sims, 2))
 
-        # Sum it up
-        loss = loss.sum() / loss.size(0)
-
         # Background loss
-        bg_loss = bg_logits.sum() / bg_logits.size(0)
+        bg_loss = (torch.pow(bg_logits, 2) * bg_logits).sum() / bg_logits.size(-1)
 
-        pos_loss = loss / 10
-        background_loss = bg_loss * 5
-
-        return pos_loss, background_loss
+        return cls_loss / 10, bg_loss * 10
 
     def loss_boxes(self, outputs, targets, indices, num_boxes):
         """
