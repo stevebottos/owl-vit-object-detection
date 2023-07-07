@@ -177,11 +177,11 @@ class PushPullLoss(torch.nn.Module):
         one_hot_targets = torch.nn.functional.one_hot(target_classes, self.n_classes)
         loss = self.class_criterion(pred_logits, one_hot_targets.float())
 
+        # Scale up where positive
+        loss[torch.where(one_hot_targets == 1)] *= 10
+
         # Focal loss style downweighting
         loss = torch.pow(1 - torch.exp(-loss), 2) * loss
-
-        # Scale up where positive
-        loss[torch.where(one_hot_targets == 1)] *= 8
 
         # Just a debug sanity check
         # sims = []
@@ -197,7 +197,7 @@ class PushPullLoss(torch.nn.Module):
         bg_loss = bg_logits.sum() / bg_logits.size(0)
 
         pos_loss = loss / 10
-        background_loss = bg_loss
+        background_loss = bg_loss * 5
 
         return pos_loss, background_loss
 

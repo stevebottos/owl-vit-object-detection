@@ -7,9 +7,14 @@ data:
 training:
   n_epochs: 10
   learning_rate: 3e-6  # Keep very low
-  save_eval_images: true
+  save_eval_images: false
   use_class_weight: true 
   weight_decay: 0.1  # default
-  confidence_threshold: 0.5  # This can be quite low and still achieve good results
-  iou_threshold: 0.5  # For nms
+  confidence_threshold: 0.01  # This can be quite low and still achieve good results
+  iou_threshold: 0.45  # For nms
+  # NOTE: Use these values for benchmarking to stay consistent with YOLO, fasterRCNN, SSD, DETR,... etc
+  #   confidence_threshold: 0.01  
+  #   iou_threshold: 0.45
+
+  
   

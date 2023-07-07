@@ -111,11 +111,16 @@ if __name__ == "__main__":
                     pred_boxes, pred_class_sims
                 )
 
+                # Use only the top 200 boxes to stay consistent with benchmarking
+                top = torch.topk(scores, min(200, scores.size(-1)))
+                scores = top.values
+                inds = top.indices.squeeze(0)
+
                 update_metrics(
                     metric,
                     metadata,
-                    pred_boxes,
-                    pred_classes,
+                    pred_boxes[:, inds],
+                    pred_classes[:, inds],
                     scores,
                     boxes,
                     labels,
