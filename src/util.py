@@ -11,26 +11,6 @@ from torchvision.utils import draw_bounding_boxes
 from datetime import timedelta
 
 
-class TensorboardLossAccumulator:
-    def __init__(self, log_dir):
-        self.class_losses = defaultdict(list)
-        self.writer = SummaryWriter(log_dir)
-
-    def update(self, classes, losses):
-        for cls, loss in zip(classes, losses):
-            self.class_losses[cls].append(loss)
-
-    def write(self, epoch):
-        loss_collector = []
-        for k, v in self.class_losses.items():
-            val = np.mean(v)
-            loss_collector.append(val)
-            self.writer.add_scalar(f"loss/{k}", val, epoch)
-        self.writer.add_scalar("loss/all", np.mean(loss_collector), epoch)
-        self.class_losses = defaultdict(list)
-        self.writer.flush()
-
-
 class GeneralLossAccumulator:
     def __init__(self):
         self.loss_values = defaultdict(lambda: 0)
@@ -56,7 +36,9 @@ class ProgressFormatter:
         self.table = {
             "epoch": [],
             "class loss": [],
+            "bg loss": [],
             "box loss": [],
+            "map": [],
             "map@0.5": [],
             "map (L/M/S)": [],
             "mar (L/M/S)": [],
@@ -67,9 +49,11 @@ class ProgressFormatter:
     def update(self, epoch, train_metrics, val_metrics):
         self.table["epoch"].append(epoch)
         self.table["class loss"].append(train_metrics["loss_ce"])
+        self.table["bg loss"].append(train_metrics["loss_bg"])
         self.table["box loss"].append(
             train_metrics["loss_bbox"] + train_metrics["loss_giou"]
         )
+        self.table["map"].append(round(val_metrics["map"].item(), 3))
         self.table["map@0.5"].append(round(val_metrics["map_50"].item(), 3))
 
         map_s = round(val_metrics["map_small"].item(), 2)
