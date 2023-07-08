@@ -68,8 +68,8 @@ if __name__ == "__main__":
         # Train loop
         losses = []
         for i, (image, labels, boxes, metadata) in enumerate(
-            # tqdm(train_dataloader, ncols=60)
-            train_dataloader
+            tqdm(train_dataloader, ncols=60)
+            # train_dataloader
         ):
             optimizer.zero_grad()
 
