@@ -174,26 +174,21 @@ class PushPullLoss(torch.nn.Module):
         target_classes = target_classes[target_classes != self.null_class]
 
         # Positive loss
-        one_hot_targets = torch.nn.functional.one_hot(target_classes, self.n_classes)
-        loss = self.class_criterion(pred_logits, one_hot_targets.float())
+        pos_targets = torch.nn.functional.one_hot(target_classes, self.n_classes)
+        neg_targets = torch.zeros(bg_logits.shape).to(bg_logits.device)
 
-        # Scale up where positive
-        loss[torch.where(one_hot_targets == 1)] *= 20
+        pos_loss = self.class_criterion(pred_logits, pos_targets.float())
+        neg_loss = self.class_criterion(bg_logits, neg_targets)
 
-        # Focal loss style downweighting
-        cls_loss = (torch.pow(1 - torch.exp(-loss), 2) * loss).sum() / loss.size(0)
+        pos_loss = (torch.pow(1 - torch.exp(-pos_loss), 2) * pos_loss).sum(
+            dim=0
+        ) / self.n_classes
 
-        # Just a debug sanity check
-        # sims = []
-        # for i, s in enumerate(pred_logits):
-        #     # print(s[target_classes[i].item())
-        #     sims.append(s[target_classes[i]].item())
-        # print(np.round(sims, 2))
+        neg_loss = (torch.pow(1 - torch.exp(-neg_loss), 2) * pos_loss).sum(
+            dim=0
+        ) / self.n_classes
 
-        # Background loss
-        bg_loss = (torch.pow(bg_logits, 2) * bg_logits).sum() / bg_logits.size(-1)
-
-        return cls_loss / 10, bg_loss * 10
+        return pos_loss.sum(), neg_loss.sum()
 
     def loss_boxes(self, outputs, targets, indices, num_boxes):
         """
