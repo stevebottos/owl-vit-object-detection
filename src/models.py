@@ -16,7 +16,6 @@ class PatchedOwlViTClassPredictionHead(nn.Module):
         super().__init__()
 
         self.query_dim = original_cls_head.query_dim
-
         self.dense0 = original_cls_head.dense0
 
     def forward(self, image_embeds, query_embeds):
@@ -29,9 +28,7 @@ class PatchedOwlViTClassPredictionHead(nn.Module):
         query_embeds = (
             query_embeds / torch.linalg.norm(query_embeds, dim=-1, keepdim=True) + 1e-6
         )
-
-        pred_sims = torch.bmm(image_class_embeds, query_embeds.transpose(1, 2))
-
+        pred_sims = image_class_embeds @ query_embeds.transpose(1, 2)
         return None, abs(pred_sims)
 
 
@@ -72,9 +69,8 @@ class OwlViT(torch.nn.Module):
     # Copied from transformers.models.clip.modeling_owlvit.OwlViTForObjectDetection.image_embedder
     # Removed some comments and docstring to clear up clutter for now
     def image_embedder(self, pixel_values):
-        vision_outputs = self.backbone(pixel_values=pixel_values)
-        last_hidden_state = vision_outputs.last_hidden_state
-        image_embeds = self.backbone.post_layernorm(last_hidden_state)
+        vision_outputs = self.backbone(pixel_values=pixel_values).last_hidden_state
+        image_embeds = self.backbone.post_layernorm(vision_outputs)
 
         new_size = tuple(np.array(image_embeds.shape) - np.array((0, 1, 0)))
         class_token_out = torch.broadcast_to(image_embeds[:, :1, :], new_size)
@@ -165,7 +161,6 @@ def load_model(labelmap, device):
 
     for name, parameter in patched_model.named_parameters():
         conditions = [
-            # "layers.11" in name,
             "box" in name,
             "post_layernorm" in name,
             "class_predictor" in name,

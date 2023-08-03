@@ -3,6 +3,11 @@ from scipy.optimize import linear_sum_assignment
 from torchvision.ops import box_area
 import numpy as np
 
+LOGFILE = "log.txt"
+
+with open(LOGFILE, "w") as f:
+    f.write("")
+
 
 # modified from torchvision to also return the union
 def box_iou(boxes1, boxes2):
@@ -138,7 +143,6 @@ class PushPullLoss(torch.nn.Module):
         self.class_criterion = torch.nn.BCELoss(reduction="none", weight=scales)
 
         self.n_classes = n_classes
-        self.null_class = n_classes + 1
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
@@ -159,36 +163,38 @@ class PushPullLoss(torch.nn.Module):
         )
         target_classes = torch.full(
             src_logits.shape[:2],
-            self.null_class,
+            self.n_classes,
             dtype=torch.int64,
             device=src_logits.device,
         )
         target_classes[idx] = target_classes_o
-        src_logits = src_logits.transpose(1, 2)
+
         assert target_classes.size(0) == 1  # TODO: batches
         target_classes.squeeze_(0)
         src_logits.squeeze_(0)
 
-        pred_logits = src_logits[:, target_classes != self.null_class].t()
-        bg_logits = src_logits[:, target_classes == self.null_class].t()
-        target_classes = target_classes[target_classes != self.null_class]
+        targets_one_hot = torch.nn.functional.one_hot(
+            target_classes, self.n_classes + 1
+        )[:, :-1]
 
-        # Positive loss
-        pos_targets = torch.nn.functional.one_hot(target_classes, self.n_classes)
-        neg_targets = torch.zeros(bg_logits.shape).to(bg_logits.device)
+        rows_with_targets = targets_one_hot.sum(dim=-1)
+        sims_of_interest = np.round(src_logits[rows_with_targets == 1].tolist(), 1)
 
-        pos_loss = self.class_criterion(pred_logits, pos_targets.float())
-        neg_loss = self.class_criterion(bg_logits, neg_targets)
+        with open(LOGFILE, "a") as f:
+            for line in sims_of_interest:
+                for element in line:
+                    f.write(str(element) + " ")
+                f.write(" " + str(max(line)) + "\n")
+            f.write("-----------------------------------------------------------\n")
 
-        pos_loss = (torch.pow(1 - torch.exp(-pos_loss), 2) * pos_loss).sum(
-            dim=0
-        ) / self.n_classes
+        loss = self.class_criterion(src_logits, targets_one_hot.float())
+        target_loss = loss[targets_one_hot == 1].mean()
+        background_loss = loss[targets_one_hot == 0]
+        background_loss = (
+            torch.pow(1 - torch.exp(-background_loss), 2) * background_loss
+        ).mean()
 
-        neg_loss = (torch.pow(1 - torch.exp(-neg_loss), 2) * pos_loss).sum(
-            dim=0
-        ) / self.n_classes
-
-        return pos_loss.sum(), neg_loss.sum()
+        return target_loss, background_loss
 
     def loss_boxes(self, outputs, targets, indices, num_boxes):
         """
