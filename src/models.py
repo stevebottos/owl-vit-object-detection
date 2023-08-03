@@ -165,7 +165,7 @@ def load_model(labelmap, device):
 
     for name, parameter in patched_model.named_parameters():
         conditions = [
-            "layers.11" in name,
+            # "layers.11" in name,
             "box" in name,
             "post_layernorm" in name,
             "class_predictor" in name,
