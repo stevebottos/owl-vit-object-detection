@@ -1,7 +1,7 @@
 import json
 import os
 from collections import Counter
-
+from collections import namedtuple
 import numpy as np
 import torch
 import yaml
@@ -12,6 +12,7 @@ from transformers import OwlViTProcessor
 TRAIN_ANNOTATIONS_FILE = "data/train.json"
 TEST_ANNOTATIONS_FILE = "data/test.json"
 LABELMAP_FILE = "data/labelmap.json"
+# example = namedtuple("Example", ["image", "labels", "boxes", "meta"])
 
 
 def get_images_dir():
@@ -19,6 +20,50 @@ def get_images_dir():
         data = yaml.safe_load(stream)["data"]
 
         return data["images_path"]
+
+
+def collate(batch):
+    return batch
+
+
+def get_dataloaders(
+    batch_size,
+    train_annotations_file=TRAIN_ANNOTATIONS_FILE,
+    test_annotations_file=TEST_ANNOTATIONS_FILE,
+):
+    image_processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch32")
+
+    train_dataset = OwlDataset(image_processor, train_annotations_file)
+    test_dataset = OwlDataset(image_processor, test_annotations_file)
+
+    with open(LABELMAP_FILE) as f:
+        labelmap = json.load(f)
+
+    train_labelcounts = Counter()
+    for i in range(len(train_dataset)):
+        train_labelcounts.update(train_dataset.load_target(i)[0])
+
+    # scales must be in order
+    scales = []
+    for i in sorted(list(train_labelcounts.keys())):
+        scales.append(train_labelcounts[i])
+
+    scales = np.array(scales)
+    scales = (np.round(np.log(scales.max() / scales) + 3, 1)).tolist()
+
+    train_labelcounts = {}
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+        collate_fn=collate,
+    )
+    test_dataloader = DataLoader(
+        test_dataset, batch_size=1, shuffle=False, num_workers=4, collate_fn=collate
+    )
+
+    return train_dataloader, test_dataloader, scales, labelmap
 
 
 class OwlDataset(Dataset):
@@ -70,39 +115,9 @@ class OwlDataset(Dataset):
             "pixel_values"
         ].squeeze(0)
 
-        return image, torch.tensor(labels), torch.tensor(boxes), metadata
-
-
-def get_dataloaders(
-    train_annotations_file=TRAIN_ANNOTATIONS_FILE,
-    test_annotations_file=TEST_ANNOTATIONS_FILE,
-):
-    image_processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch32")
-
-    train_dataset = OwlDataset(image_processor, train_annotations_file)
-    test_dataset = OwlDataset(image_processor, test_annotations_file)
-
-    with open(LABELMAP_FILE) as f:
-        labelmap = json.load(f)
-
-    train_labelcounts = Counter()
-    for i in range(len(train_dataset)):
-        train_labelcounts.update(train_dataset.load_target(i)[0])
-
-    # scales must be in order
-    scales = []
-    for i in sorted(list(train_labelcounts.keys())):
-        scales.append(train_labelcounts[i])
-
-    scales = np.array(scales)
-    scales = (np.round(np.log(scales.max() / scales) + 3, 1)).tolist()
-
-    train_labelcounts = {}
-    train_dataloader = DataLoader(
-        train_dataset, batch_size=1, shuffle=True, num_workers=4
-    )
-    test_dataloader = DataLoader(
-        test_dataset, batch_size=1, shuffle=False, num_workers=4
-    )
-
-    return train_dataloader, test_dataloader, scales, labelmap
+        return {
+            "image": image,
+            "labels": torch.tensor(labels),
+            "boxes": torch.tensor(boxes),
+            "meta": metadata,
+        }

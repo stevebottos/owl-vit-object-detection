@@ -37,7 +37,9 @@ if __name__ == "__main__":
         shutil.rmtree("debug")
 
     training_cfg = get_training_config()
-    train_dataloader, test_dataloader, scales, labelmap = get_dataloaders()
+    train_dataloader, test_dataloader, scales, labelmap = get_dataloaders(
+        batch_size=training_cfg["batch_size"]
+    )
 
     model = load_model(labelmap, device)
 
@@ -67,30 +69,31 @@ if __name__ == "__main__":
 
         # Train loop
         losses = []
-        for i, (image, labels, boxes, metadata) in enumerate(
-            tqdm(train_dataloader, ncols=60)
-            # train_dataloader
-        ):
+        for i, examples in enumerate(tqdm(train_dataloader, ncols=60)):
+            batch_loss = 0
             optimizer.zero_grad()
+            for example in examples:
+                # Prep inputs
+                image = example["image"].to(device).unsqueeze(0)
+                labels = example["labels"].to(device).unsqueeze(0)
+                boxes = example["boxes"].to(device).unsqueeze(0)
+                boxes = coco_to_model_input(boxes, example["meta"]).to(device)
 
-            # Prep inputs
-            image = image.to(device)
-            labels = labels.to(device)
-            boxes = coco_to_model_input(boxes, metadata).to(device)
+                # Predict
+                all_pred_boxes, pred_classes, pred_sims, _ = model(image)
+                losses = criterion(pred_sims, labels, all_pred_boxes, boxes)
+                batch_loss += (
+                    losses["loss_ce"]
+                    + losses["loss_bg"]
+                    + losses["loss_bbox"]
+                    + losses["loss_giou"]
+                )
 
-            # Predict
-            all_pred_boxes, pred_classes, pred_sims, _ = model(image)
-            losses = criterion(pred_sims, labels, all_pred_boxes, boxes)
-            loss = (
-                losses["loss_ce"]
-                + losses["loss_bg"]
-                + losses["loss_bbox"]
-                + losses["loss_giou"]
-            )
-            loss.backward()
+                general_loss.update(losses)
+            # print(batch_loss.item())
+            batch_loss /= training_cfg["batch_size"]
+            batch_loss.backward()
             optimizer.step()
-
-            general_loss.update(losses)
 
         train_metrics = general_loss.get_values()
         general_loss.reset()
@@ -98,47 +101,48 @@ if __name__ == "__main__":
         # Eval loop
         model.eval()
         with torch.no_grad():
-            for i, (image, labels, boxes, metadata) in enumerate(
-                tqdm(test_dataloader, ncols=60)
-            ):
-                # Prep inputs
-                image = image.to(device)
-                labels = labels.to(device)
-                boxes = coco_to_model_input(boxes, metadata).to(device)
+            for i, examples in enumerate(tqdm(test_dataloader, ncols=60)):
+                for example in examples:
+                    # Prep inputs
+                    image = example["image"].to(device).unsqueeze(0)
+                    labels = example["labels"].to(device).unsqueeze(0)
+                    boxes = example["boxes"].to(device).unsqueeze(0)
+                    metadata = example["meta"]
+                    boxes = coco_to_model_input(boxes, metadata).to(device)
 
-                # Get predictions and save output
-                pred_boxes, pred_classes, pred_class_sims, _ = model(image)
-                pred_boxes, pred_classes, scores = postprocess(
-                    pred_boxes, pred_class_sims
-                )
-
-                # Use only the top 200 boxes to stay consistent with benchmarking
-                top = torch.topk(scores, min(200, scores.size(-1)))
-                scores = top.values
-                inds = top.indices.squeeze(0)
-
-                update_metrics(
-                    metric,
-                    metadata,
-                    pred_boxes[:, inds],
-                    pred_classes[:, inds],
-                    scores,
-                    boxes,
-                    labels,
-                )
-
-                if training_cfg["save_eval_images"]:
-                    pred_classes_with_names = labels_to_classnames(
-                        pred_classes, labelmap
-                    )
-                    pred_boxes = model_output_to_image(pred_boxes.cpu(), metadata)
-                    image_with_boxes = BoxUtil.draw_box_on_image(
-                        metadata["impath"].pop(),
-                        pred_boxes,
-                        pred_classes_with_names,
+                    # Get predictions and save output
+                    pred_boxes, pred_classes, pred_class_sims, _ = model(image)
+                    pred_boxes, pred_classes, scores = postprocess(
+                        pred_boxes, pred_class_sims
                     )
 
-                    write_png(image_with_boxes, f"debug/{epoch}/{i}.jpg")
+                    # Use only the top 200 boxes to stay consistent with benchmarking
+                    top = torch.topk(scores, min(200, scores.size(-1)))
+                    scores = top.values
+                    inds = top.indices.squeeze(0)
+
+                    update_metrics(
+                        metric,
+                        metadata,
+                        pred_boxes[:, inds],
+                        pred_classes[:, inds],
+                        scores,
+                        boxes,
+                        labels,
+                    )
+
+                    if training_cfg["save_eval_images"]:
+                        pred_classes_with_names = labels_to_classnames(
+                            pred_classes, labelmap
+                        )
+                        pred_boxes = model_output_to_image(pred_boxes.cpu(), metadata)
+                        image_with_boxes = BoxUtil.draw_box_on_image(
+                            metadata["impath"].pop(),
+                            pred_boxes,
+                            pred_classes_with_names,
+                        )
+
+                        write_png(image_with_boxes, f"debug/{epoch}/{i}.jpg")
 
         print("Computing metrics...")
         val_metrics = metric.compute()

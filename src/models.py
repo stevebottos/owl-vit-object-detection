@@ -164,13 +164,14 @@ def load_model(labelmap, device):
     patched_model = OwlViT(pretrained_model=_model, query_bank=queries)
 
     for name, parameter in patched_model.named_parameters():
-        if (
-            "layers.11" in name
-            or ("box" in name)
-            or ("post_layernorm" in name)
-            or ("class_predictor" in name)
-            or ("queries" in name)
-        ):
+        conditions = [
+            "layers.11" in name,
+            "box" in name,
+            "post_layernorm" in name,
+            "class_predictor" in name,
+            "queries" in name,
+        ]
+        if any(conditions):
             continue
 
         parameter.requires_grad = False
