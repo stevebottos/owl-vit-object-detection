@@ -49,7 +49,10 @@ def get_dataloaders(
         scales.append(train_labelcounts[i])
 
     scales = np.array(scales)
-    scales = (np.round(np.log(scales.max() / scales) + 3, 1)).tolist()
+    scales = scales.max() / scales
+    # print(scales)
+    # exit()
+    # scales = (np.round(np.log(scales.max() / scales) + 1, 1)).tolist()
 
     train_labelcounts = {}
     train_dataloader = DataLoader(

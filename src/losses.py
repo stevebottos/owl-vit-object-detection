@@ -143,7 +143,7 @@ class PushPullLoss(torch.nn.Module):
         self.class_criterion = torch.nn.BCELoss(reduction="none", weight=scales)
 
         self.n_classes = n_classes
-        self.null_class_margin = 0.2
+        self.m = 0.1
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
@@ -178,26 +178,28 @@ class PushPullLoss(torch.nn.Module):
             target_classes, self.n_classes + 1
         )[:, :-1]
 
-        rows_with_targets = targets_one_hot.sum(dim=-1)
-        sims_of_interest = np.round(src_logits[rows_with_targets == 1].tolist(), 1)
+        # rows_with_targets = targets_one_hot.sum(dim=-1)
+        # sims_of_interest = np.round(src_logits[rows_with_targets == 1].tolist(), 1)
+        # with open(LOGFILE, "a") as f:
+        #     for line in sims_of_interest:
+        #         for element in line:
+        #             if element < 0.01:
+        #                 element = 0.0
 
-        with open(LOGFILE, "a") as f:
-            for line in sims_of_interest:
-                for element in line:
-                    f.write(str(element) + " ")
-                f.write(" " + str(max(line)) + "\n")
-            f.write("-----------------------------------------------------------\n")
+        #             f.write(str(element) + " ")
+        #         f.write(" " + str(max(line)) + "\n")
+        #     f.write("-----------------------------------------------------------\n")
 
-        loss = self.class_criterion(src_logits, targets_one_hot.float())
-        target_loss = loss[targets_one_hot == 1]
-        background_loss = loss[torch.where((targets_one_hot == 0) & (src_logits > 0.1))]
+        pos = src_logits[targets_one_hot == 1]
+        pos_error = torch.exp(1 - pos).pow(2) - 1
+        pos_error = pos_error.mean()
+        # print(pos_error.item())
 
-        target_loss = target_loss.mean()
-        background_loss = (
-            torch.pow(1 - torch.exp(-background_loss), 3) * background_loss
-        ).mean()
+        neg = src_logits[torch.where((targets_one_hot == 0) & (src_logits >= self.m))]
+        neg_error = torch.exp(neg).pow(2) - 1
+        neg_error = neg_error.mean()
 
-        return target_loss, background_loss
+        return pos_error, neg_error
 
     def loss_boxes(self, outputs, targets, indices, num_boxes):
         """

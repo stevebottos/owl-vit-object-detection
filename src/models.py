@@ -4,8 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image
-from torch.nn.functional import softmax
-from torchvision.ops import nms, batched_nms
+from torchvision.ops import batched_nms
 from transformers import AutoProcessor, OwlViTForObjectDetection
 from transformers.image_transforms import center_to_corners_format
 
