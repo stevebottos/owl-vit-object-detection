@@ -143,6 +143,7 @@ class PushPullLoss(torch.nn.Module):
         self.class_criterion = torch.nn.BCELoss(reduction="none", weight=scales)
 
         self.n_classes = n_classes
+        self.null_class_margin = 0.2
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
@@ -188,10 +189,12 @@ class PushPullLoss(torch.nn.Module):
             f.write("-----------------------------------------------------------\n")
 
         loss = self.class_criterion(src_logits, targets_one_hot.float())
-        target_loss = loss[targets_one_hot == 1].mean()
-        background_loss = loss[targets_one_hot == 0]
+        target_loss = loss[targets_one_hot == 1]
+        background_loss = loss[torch.where((targets_one_hot == 0) & (src_logits > 0.1))]
+
+        target_loss = target_loss.mean()
         background_loss = (
-            torch.pow(1 - torch.exp(-background_loss), 2) * background_loss
+            torch.pow(1 - torch.exp(-background_loss), 3) * background_loss
         ).mean()
 
         return target_loss, background_loss

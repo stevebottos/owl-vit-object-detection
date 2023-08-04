@@ -29,7 +29,7 @@ class PatchedOwlViTClassPredictionHead(nn.Module):
             query_embeds / torch.linalg.norm(query_embeds, dim=-1, keepdim=True) + 1e-6
         )
         pred_sims = image_class_embeds @ query_embeds.transpose(1, 2)
-        return None, abs(pred_sims)
+        return None, torch.clamp(pred_sims, 0, 1)
 
 
 class OwlViT(torch.nn.Module):
