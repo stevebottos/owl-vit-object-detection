@@ -10,25 +10,34 @@ from transformers.image_transforms import center_to_corners_format
 
 
 # Monkey patched for no in-place ops
-class PatchedOwlViTClassPredictionHead(nn.Module):
-    def __init__(self, original_cls_head):
+class PredictionHead(nn.Module):
+    def __init__(self, support_set, support_mask, embedding_shape=(576, 768)):
         super().__init__()
 
-        self.query_dim = original_cls_head.query_dim
-        self.dense0 = original_cls_head.dense0
+        self.support_set = (
+            support_set / torch.linalg.norm(support_set, dim=-1, keepdim=True) + 1e-6
+        ).t()
+        self.rows = embedding_shape[0]
+        self.support_mask = support_mask
+        print(self.support_mask)
+        self.support_labels = sorted(set(support_mask.tolist()))
+        self.logit_shift = torch.nn.Parameter(torch.zeros(embedding_shape))
+        self.logit_scale = torch.nn.Parameter(torch.ones(embedding_shape))
 
-    def forward(self, image_embeds, query_embeds):
-        image_class_embeds = self.dense0(image_embeds)
+    def forward(self, embeddings):
+        embeddings = (embeddings + self.logit_shift) * self.logit_scale
 
-        # Normalize image and text features
-        image_class_embeds = image_class_embeds / (
-            torch.linalg.norm(image_class_embeds, dim=-1, keepdim=True) + 1e-6
+        embeddings = (
+            embeddings / torch.linalg.norm(embeddings, dim=-1, keepdim=True) + 1e-6
         )
-        query_embeds = (
-            query_embeds / torch.linalg.norm(query_embeds, dim=-1, keepdim=True) + 1e-6
-        )
-        pred_sims = image_class_embeds @ query_embeds.transpose(1, 2)
-        return None, torch.clamp(pred_sims, 0, 1)
+        predictions = embeddings @ self.support_set
+
+        # Collapse to classes
+        collapsed_predictions = torch.zeros(self.rows, len(self.support_labels))
+        for label in self.support_labels:
+            _predictions = predictions[:, self.support_mask == label].max(dim=1).values
+            collapsed_predictions[:, label] = _predictions
+        return collapsed_predictions
 
 
 class OwlViT(torch.nn.Module):
@@ -38,20 +47,23 @@ class OwlViT(torch.nn.Module):
     classifier to filter noise.
     """
 
-    def __init__(self, pretrained_model, query_bank):
+    def __init__(self, pretrained_model):
         super().__init__()
 
         # Take the pretrained components that are useful to us
         self.backbone = pretrained_model.owlvit.vision_model
         self.post_post_layernorm = pretrained_model.layer_norm
-        self.class_predictor = PatchedOwlViTClassPredictionHead(
-            pretrained_model.class_head
-        )
         self.box_head = pretrained_model.box_head
         self.compute_box_bias = pretrained_model.compute_box_bias
-        self.sigmoid = pretrained_model.sigmoid
+        self.sigmoid = torch.nn.Sigmoid()
 
-        self.queries = torch.nn.Parameter(query_bank, requires_grad=True)
+    def freeze(self):
+        for parameter in self.parameters():
+            parameter.requires_grad = False
+
+    def unfreeze_box_head(self):
+        for parameter in self.box_head.parameters():
+            parameter.requires_grad = True
 
     # Copied from transformers.models.clip.modeling_owlvit.OwlViTForObjectDetection.box_predictor
     # Removed some comments and docstring to clear up clutter for now
@@ -100,79 +112,41 @@ class OwlViT(torch.nn.Module):
         )
 
         image_feats = torch.reshape(feature_map, new_size)
-
-        # Box predictions
         pred_boxes = self.box_predictor(image_feats, feature_map)
 
-        pred_class_logits, pred_class_sims = self.class_predictor(
-            image_feats, self.queries
-        )
-
-        return (pred_boxes, pred_class_logits, pred_class_sims, None)
+        return image_feats, pred_boxes
 
 
-class PostProcess:
-    def __init__(self, confidence_threshold=0.75, iou_threshold=0.3):
-        self.confidence_threshold = confidence_threshold
-        self.iou_threshold = iou_threshold
+# class PostProcess:
+#     def __init__(self, confidence_threshold=0.75, iou_threshold=0.3):
+#         self.confidence_threshold = confidence_threshold
+#         self.iou_threshold = iou_threshold
 
-    def __call__(self, all_pred_boxes, pred_classes):
-        # Just support batch size of one for now
-        pred_boxes = all_pred_boxes.squeeze(0)
-        pred_classes = pred_classes.squeeze(0)
+#     def __call__(self, all_pred_boxes, pred_classes):
+#         # Just support batch size of one for now
+#         pred_boxes = all_pred_boxes.squeeze(0)
+#         pred_classes = pred_classes.squeeze(0)
 
-        # np.savetxt("x.txt", pred_classes.tolist(), fmt="%.2f")
+#         # np.savetxt("x.txt", pred_classes.tolist(), fmt="%.2f")
 
-        top = torch.max(pred_classes, dim=1)
-        scores = top.values
-        classes = top.indices
+#         top = torch.max(pred_classes, dim=1)
+#         scores = top.values
+#         classes = top.indices
 
-        idx = scores > self.confidence_threshold
-        scores = scores[idx]
-        classes = classes[idx]
-        pred_boxes = pred_boxes[idx]
+#         idx = scores > self.confidence_threshold
+#         scores = scores[idx]
+#         classes = classes[idx]
+#         pred_boxes = pred_boxes[idx]
 
-        idx = batched_nms(pred_boxes, scores, classes, iou_threshold=self.iou_threshold)
-        classes = classes[idx]
-        pred_boxes = pred_boxes[idx]
-        scores = scores[idx]
+#         idx = batched_nms(pred_boxes, scores, classes, iou_threshold=self.iou_threshold)
+#         classes = classes[idx]
+#         pred_boxes = pred_boxes[idx]
+#         scores = scores[idx]
 
-        return pred_boxes.unsqueeze_(0), classes.unsqueeze_(0), scores.unsqueeze_(0)
+#         return pred_boxes.unsqueeze_(0), classes.unsqueeze_(0), scores.unsqueeze_(0)
 
 
-def load_model(labelmap, device):
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
+def load_model(device):
     _model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
-    _processor = AutoProcessor.from_pretrained("google/owlvit-base-patch32")
-
-    print("Initializing priors from labels...")
-    inputs = _processor(
-        text=[list(labelmap.values())],
-        images=Image.new("RGB", (224, 224)),
-        return_tensors="pt",
-    )
-
-    with torch.no_grad():
-        queries = _model(**inputs).text_embeds
-
-    patched_model = OwlViT(pretrained_model=_model, query_bank=queries)
-
-    for name, parameter in patched_model.named_parameters():
-        conditions = [
-            "box" in name,
-            "post_layernorm" in name,
-            "class_predictor" in name,
-            "queries" in name,
-        ]
-        if any(conditions):
-            continue
-
-        parameter.requires_grad = False
-
-    print("Trainable parameters:")
-    for name, parameter in patched_model.named_parameters():
-        if parameter.requires_grad:
-            print(f"  {name}")
-    print()
+    patched_model = OwlViT(pretrained_model=_model)
     return patched_model.to(device)

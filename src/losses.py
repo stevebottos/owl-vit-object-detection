@@ -58,7 +58,11 @@ class HungarianMatcher(torch.nn.Module):
     """
 
     def __init__(
-        self, cost_class: float = 1, cost_bbox: float = 1, cost_giou: float = 1
+        self,
+        n_classes,
+        cost_class: float = 1,
+        cost_bbox: float = 1,
+        cost_giou: float = 1,
     ):
         """Creates the matcher
         Params:
@@ -67,12 +71,21 @@ class HungarianMatcher(torch.nn.Module):
             cost_giou: This is the relative weight of the giou loss of the bounding box in the matching cost
         """
         super().__init__()
+        self.n_classes = n_classes
         self.cost_class = cost_class
         self.cost_bbox = cost_bbox
         self.cost_giou = cost_giou
         assert (
             cost_class != 0 or cost_bbox != 0 or cost_giou != 0
         ), "all costs cant be 0"
+
+    def _get_src_permutation_idx(self, indices):
+        # permute predictions following indices
+        batch_idx = torch.cat(
+            [torch.full_like(src, i) for i, (src, _) in enumerate(indices)]
+        )
+        src_idx = torch.cat([src for (src, _) in indices])
+        return batch_idx, src_idx
 
     @torch.no_grad()
     def forward(self, outputs, targets):
@@ -127,7 +140,8 @@ class HungarianMatcher(torch.nn.Module):
         indices = [
             linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))
         ]
-        return [
+
+        indices = [
             (
                 torch.as_tensor(i, dtype=torch.int64),
                 torch.as_tensor(j, dtype=torch.int64),
@@ -135,40 +149,36 @@ class HungarianMatcher(torch.nn.Module):
             for i, j in indices
         ]
 
+        idx = self._get_src_permutation_idx(indices)
+
+        target_classes_o = torch.cat(
+            [t["labels"][J] for t, (_, J) in zip(targets, indices)]
+        )
+        target_classes = torch.full(
+            outputs["pred_boxes"].shape[:2],
+            self.n_classes,
+            dtype=torch.int64,
+            device=outputs["pred_boxes"].device,
+        )
+        target_classes[idx] = target_classes_o
+
+        return target_classes
+
 
 class PushPullLoss(torch.nn.Module):
     def __init__(self, n_classes, scales):
         super().__init__()
-        self.matcher = HungarianMatcher()
+        self.matcher = HungarianMatcher(n_classes)
         self.class_criterion = torch.nn.BCELoss(reduction="none", weight=scales)
 
         self.n_classes = n_classes
         self.m = 0.1
 
-    def _get_src_permutation_idx(self, indices):
-        # permute predictions following indices
-        batch_idx = torch.cat(
-            [torch.full_like(src, i) for i, (src, _) in enumerate(indices)]
-        )
-        src_idx = torch.cat([src for (src, _) in indices])
-        return batch_idx, src_idx
-
-    def class_loss(self, outputs, targets, indices):
+    def class_loss(self, outputs, targets, target_classes):
         """
         Custom loss that works off of similarities
         """
         src_logits = outputs["pred_logits"]
-        idx = self._get_src_permutation_idx(indices)
-        target_classes_o = torch.cat(
-            [t["labels"][J] for t, (_, J) in zip(targets, indices)]
-        )
-        target_classes = torch.full(
-            src_logits.shape[:2],
-            self.n_classes,
-            dtype=torch.int64,
-            device=src_logits.device,
-        )
-        target_classes[idx] = target_classes_o
 
         assert target_classes.size(0) == 1  # TODO: batches
         target_classes.squeeze_(0)
@@ -177,18 +187,6 @@ class PushPullLoss(torch.nn.Module):
         targets_one_hot = torch.nn.functional.one_hot(
             target_classes, self.n_classes + 1
         )[:, :-1]
-
-        # rows_with_targets = targets_one_hot.sum(dim=-1)
-        # sims_of_interest = np.round(src_logits[rows_with_targets == 1].tolist(), 1)
-        # with open(LOGFILE, "a") as f:
-        #     for line in sims_of_interest:
-        #         for element in line:
-        #             if element < 0.01:
-        #                 element = 0.0
-
-        #             f.write(str(element) + " ")
-        #         f.write(" " + str(max(line)) + "\n")
-        #     f.write("-----------------------------------------------------------\n")
 
         pos = src_logits[targets_one_hot == 1]
         pos_error = torch.exp(1 - pos).pow(2) - 1
@@ -215,7 +213,6 @@ class PushPullLoss(torch.nn.Module):
         target_boxes = torch.cat(
             [t["boxes"][i] for t, (_, i) in zip(targets, indices)], dim=0
         )
-
         loss_bbox = torch.nn.functional.l1_loss(
             src_boxes, target_boxes, reduction="none"
         )
@@ -247,25 +244,21 @@ class PushPullLoss(torch.nn.Module):
             {"labels": _labels, "boxes": _boxes}
             for _boxes, _labels in zip(target_boxes, target_classes)
         ]
+        target_classes = self.matcher(in_preds, in_targets)
 
-        indices = self.matcher(in_preds, in_targets)
-        # Batch index is meaningless since we use a single batch
-        # batch index is like [0,0,0,1,1,1,1,1,1,2,2,2,2,3,3] ... etc depending on number of batches
-        # TODO: Generalize to more batches
-        # target_classes.squeeze_(0)
-        # predicted_classes.squeeze_(0)
-
-        loss_class, loss_background = self.class_loss(in_preds, in_targets, indices)
-        loss_bbox, loss_giou = self.loss_boxes(
-            in_preds,
-            in_targets,
-            indices,
-            num_boxes=sum(len(t["labels"]) for t in in_targets),
+        loss_class, loss_background = self.class_loss(
+            in_preds, in_targets, target_classes
         )
+        # loss_bbox, loss_giou = self.loss_boxes(
+        #     in_preds,
+        #     in_targets,
+        #     indices,
+        #     num_boxes=sum(len(t["labels"]) for t in in_targets),
+        # )
         losses = {
             "loss_ce": loss_class,
             "loss_bg": loss_background,
-            "loss_bbox": loss_bbox,
-            "loss_giou": loss_giou,
+            # "loss_bbox": loss_bbox,
+            # "loss_giou": loss_giou,
         }
         return losses
