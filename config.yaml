@@ -5,9 +5,9 @@ data:
   num_test_images: 100
 
 training:
-  n_epochs: 20
+  n_epochs: 5
   batch_size: 1
-  learning_rate: 3e-6  # Keep very low
+  learning_rate: 3e-4  # Keep very low
   save_eval_images: false
   use_class_weight: true 
   weight_decay: 0.01

@@ -14,30 +14,42 @@ class PredictionHead(nn.Module):
     def __init__(self, support_set, support_mask, embedding_shape=(576, 768)):
         super().__init__()
 
-        self.support_set = (
+        support_set = (
             support_set / torch.linalg.norm(support_set, dim=-1, keepdim=True) + 1e-6
         ).t()
+        self.support_set = torch.nn.Parameter(support_set)
+
         self.rows = embedding_shape[0]
         self.support_mask = support_mask
-        print(self.support_mask)
         self.support_labels = sorted(set(support_mask.tolist()))
-        self.logit_shift = torch.nn.Parameter(torch.zeros(embedding_shape))
-        self.logit_scale = torch.nn.Parameter(torch.ones(embedding_shape))
+
+        self.mlp = torch.nn.Sequential(
+            torch.nn.Linear(embedding_shape[-1], embedding_shape[-1]),
+            torch.nn.Tanh(),
+            torch.nn.Linear(embedding_shape[-1], embedding_shape[-1]),
+            torch.nn.Tanh(),
+            torch.nn.Linear(embedding_shape[-1], embedding_shape[-1]),
+            # torch.nn.Tanh(),
+            # torch.nn.Linear(embedding_shape[-1], embedding_shape[-1]),
+        )
+        self.pooler = torch.nn.Linear(len(support_mask), 80)
+
+        # for layer in self.mlp:
+        #     if isinstance(layer, torch.nn.Linear):
+        #         layer.weight.data.fill_(1)
+        #         layer.bias.data.fill_(1)
 
     def forward(self, embeddings):
-        embeddings = (embeddings + self.logit_shift) * self.logit_scale
+        embeddings = self.mlp(embeddings)
 
         embeddings = (
             embeddings / torch.linalg.norm(embeddings, dim=-1, keepdim=True) + 1e-6
         )
         predictions = embeddings @ self.support_set
 
-        # Collapse to classes
-        collapsed_predictions = torch.zeros(self.rows, len(self.support_labels))
-        for label in self.support_labels:
-            _predictions = predictions[:, self.support_mask == label].max(dim=1).values
-            collapsed_predictions[:, label] = _predictions
-        return collapsed_predictions
+        predictions = self.pooler(predictions)
+        predictions = torch.nn.functional.sigmoid(predictions).clone()
+        return predictions
 
 
 class OwlViT(torch.nn.Module):
@@ -57,13 +69,13 @@ class OwlViT(torch.nn.Module):
         self.compute_box_bias = pretrained_model.compute_box_bias
         self.sigmoid = torch.nn.Sigmoid()
 
-    def freeze(self):
-        for parameter in self.parameters():
-            parameter.requires_grad = False
+    # def freeze(self):
+    #     for parameter in self.parameters():
+    #         parameter.requires_grad = False
 
-    def unfreeze_box_head(self):
-        for parameter in self.box_head.parameters():
-            parameter.requires_grad = True
+    # def unfreeze_box_head(self):
+    #     for parameter in self.box_head.parameters():
+    #         parameter.requires_grad = True
 
     # Copied from transformers.models.clip.modeling_owlvit.OwlViTForObjectDetection.box_predictor
     # Removed some comments and docstring to clear up clutter for now
@@ -149,4 +161,23 @@ class OwlViT(torch.nn.Module):
 def load_model(device):
     _model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
     patched_model = OwlViT(pretrained_model=_model)
+
+    for name, parameter in patched_model.named_parameters():
+        # if (
+        #     "layers.11" in name
+        #     or ("box" in name)
+        #     or ("post_layernorm" in name)
+        #     or ("class_predictor" in name)
+        #     or ("queries" in name)
+        # ):
+        #     continue
+
+        parameter.requires_grad = False
+
+    print("Trainable parameters:")
+    for name, parameter in patched_model.named_parameters():
+        if parameter.requires_grad:
+            print(f"  {name}")
+    print()
+
     return patched_model.to(device)

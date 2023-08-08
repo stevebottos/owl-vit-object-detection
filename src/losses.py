@@ -169,12 +169,10 @@ class PushPullLoss(torch.nn.Module):
     def __init__(self, n_classes, scales):
         super().__init__()
         self.matcher = HungarianMatcher(n_classes)
-        self.class_criterion = torch.nn.BCELoss(reduction="none", weight=scales)
-
         self.n_classes = n_classes
         self.m = 0.1
 
-    def class_loss(self, outputs, targets, target_classes):
+    def class_loss(self, outputs, target_classes):
         """
         Custom loss that works off of similarities
         """
@@ -189,12 +187,11 @@ class PushPullLoss(torch.nn.Module):
         )[:, :-1]
 
         pos = src_logits[targets_one_hot == 1]
-        pos_error = torch.exp(1 - pos).pow(2) - 1
+        pos_error = torch.exp(1 - pos).pow(4) - 1
         pos_error = pos_error.mean()
-        # print(pos_error.item())
 
         neg = src_logits[torch.where((targets_one_hot == 0) & (src_logits >= self.m))]
-        neg_error = torch.exp(neg).pow(2) - 1
+        neg_error = torch.exp(neg).pow(4) - 1
         neg_error = neg_error.mean()
 
         return pos_error, neg_error
@@ -246,9 +243,17 @@ class PushPullLoss(torch.nn.Module):
         ]
         target_classes = self.matcher(in_preds, in_targets)
 
-        loss_class, loss_background = self.class_loss(
-            in_preds, in_targets, target_classes
-        )
+        # for box, label in zip(predicted_boxes[0], target_classes[0]):
+        #     if label == self.n_classes:
+        #         continue
+
+        #     iou, _ = box_iou(box.unsqueeze(0), predicted_boxes.squeeze(0))
+        #     idx = iou > 0.85
+        #     target_classes[idx] = label.item()
+        #     boxes.append(box)
+        #     classes.append(label.item())
+
+        loss_class, loss_background = self.class_loss(in_preds, target_classes)
         # loss_bbox, loss_giou = self.loss_boxes(
         #     in_preds,
         #     in_targets,

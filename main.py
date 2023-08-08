@@ -86,7 +86,11 @@ if __name__ == "__main__":
                 boxes = coco_to_model_input(boxes, example["meta"]).to(device)
 
                 # Predict
+                import time
+
+                _t = time.time()
                 all_pred_boxes, pred_classes, pred_sims, _ = model(image)
+                print(time.time() - _t)
                 losses = criterion(pred_sims, labels, all_pred_boxes, boxes)
                 batch_loss += (
                     losses["loss_ce"]
