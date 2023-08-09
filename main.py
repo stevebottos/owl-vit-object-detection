@@ -8,7 +8,7 @@ from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from torchvision.io import write_png
 from tqdm import tqdm
 
-from src.losses import PushPullLoss
+from src.losses import CombinedLoss
 from src.dataset import get_dataloaders
 from src.models import PostProcess, load_model
 from src.train_util import (
@@ -42,17 +42,11 @@ if __name__ == "__main__":
     )
 
     model = load_model(labelmap, device)
+    criterion = CombinedLoss(len(labelmap))
 
     postprocess = PostProcess(
         confidence_threshold=training_cfg["confidence_threshold"],
         iou_threshold=training_cfg["iou_threshold"],
-    )
-
-    criterion = PushPullLoss(
-        len(labelmap),
-        scales=torch.tensor(scales).to(device)
-        if training_cfg["use_class_weight"]
-        else None,
     )
 
     # optimizer = torch.optim.AdamW(
@@ -64,11 +58,11 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=float(training_cfg["learning_rate"]),
-        # weight_decay=training_cfg["weight_decay"],
     )
 
     model.train()
     classMAPs = {v: [] for v in list(labelmap.values())}
+    scaler = torch.cuda.amp.GradScaler()
     for epoch in range(training_cfg["n_epochs"]):
         if training_cfg["save_eval_images"]:
             os.makedirs(f"debug/{epoch}", exist_ok=True)
@@ -86,20 +80,22 @@ if __name__ == "__main__":
                 boxes = coco_to_model_input(boxes, example["meta"]).to(device)
 
                 # Predict
-                all_pred_boxes, pred_classes, pred_sims, _ = model(image)
-                losses = criterion(pred_sims, labels, all_pred_boxes, boxes)
-                batch_loss += (
-                    losses["loss_ce"]
-                    + losses["loss_bg"]
-                    + losses["loss_bbox"]
-                    + losses["loss_giou"]
-                )
+                with torch.cuda.amp.autocast():
+                    pred_boxes, pred_classes = model(image)
+                    losses = criterion(pred_classes, labels, pred_boxes, boxes)
+                    batch_loss += (
+                        losses["loss_ce"]
+                        + losses["loss_bg"]
+                        + losses["loss_bbox"]
+                        + losses["loss_giou"]
+                    )
+                    general_loss.update(losses)
 
-                general_loss.update(losses)
-            # print(batch_loss.item())
             batch_loss /= training_cfg["batch_size"]
-            batch_loss.backward()
-            optimizer.step()
+            scaler.scale(batch_loss).backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+            scaler.step(optimizer)
+            scaler.update()
 
         train_metrics = general_loss.get_values()
         general_loss.reset()
@@ -117,9 +113,9 @@ if __name__ == "__main__":
                     boxes = coco_to_model_input(boxes, metadata).to(device)
 
                     # Get predictions and save output
-                    pred_boxes, pred_classes, pred_class_sims, _ = model(image)
+                    pred_boxes, pred_classes = model(image)
                     pred_boxes, pred_classes, scores = postprocess(
-                        pred_boxes, pred_class_sims
+                        pred_boxes, pred_classes
                     )
 
                     # Use only the top 200 boxes to stay consistent with benchmarking
