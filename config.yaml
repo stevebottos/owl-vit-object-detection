@@ -1,12 +1,12 @@
 data:
   images_path: "/media/steve/Seagate Portable Drive/datasets/coco/train2014"
   annotations_file: "/media/steve/Seagate Portable Drive/datasets/coco/annotations/instances_train2014.json"
-  num_train_images: 2500 # Keep high enough to ensure that at least one of each label is seen in training. 2500 is a good minimum
-  num_test_images: 200
+  num_train_images: 10000 # Keep high enough to ensure that at least one of each label is seen in training. 2500 is a good minimum
+  num_test_images: 500
 
 training:
   n_epochs: 20
-  learning_rate: 6e-6  # Keep very low
+  learning_rate: 3e-6  # Keep very low
   save_eval_images: false
   use_class_weight: true 
   weight_decay: 0.1  # default

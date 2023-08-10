@@ -13,14 +13,6 @@ class PushPullLoss(torch.nn.Module):
         self.class_criterion = torch.nn.BCELoss(reduction="none", weight=scales)
         self.background_label = n_classes
 
-    def _get_src_permutation_idx(self, indices):
-        # permute predictions following indices
-        batch_idx = torch.cat(
-            [torch.full_like(src, i) for i, (src, _) in enumerate(indices)]
-        )
-        src_idx = torch.cat([src for (src, _) in indices])
-        return batch_idx, src_idx
-
     def class_loss(self, outputs, target_classes):
         """
         Custom loss that works off of similarities
@@ -28,7 +20,6 @@ class PushPullLoss(torch.nn.Module):
 
         src_logits = outputs["pred_logits"]
         src_logits = src_logits.transpose(1, 2)
-        assert target_classes.size(0) == 1  # TODO: batches
         target_classes.squeeze_(0)
         src_logits.squeeze_(0)
 
@@ -43,10 +34,14 @@ class PushPullLoss(torch.nn.Module):
         pos_loss = self.class_criterion(pred_logits, pos_targets.float())
         neg_loss = self.class_criterion(bg_logits, neg_targets)
 
-        pos_loss = (torch.pow(1 - torch.exp(-pos_loss), 2) * pos_loss).sum(dim=0).mean()
-        neg_loss = (torch.pow(1 - torch.exp(-neg_loss), 2) * neg_loss).sum(dim=0).mean()
+        pos_loss = (torch.pow(1 - torch.exp(-pos_loss), 2) * pos_loss).sum(
+            dim=0
+        ) / self.background_label
+        neg_loss = (torch.pow(1 - torch.exp(-neg_loss), 2) * neg_loss).sum(
+            dim=0
+        ) / self.background_label
 
-        return pos_loss, neg_loss
+        return pos_loss.sum(), neg_loss.sum()
 
     def loss_boxes(self, outputs, targets, indices, idx, num_boxes):
         """
@@ -110,13 +105,13 @@ class PushPullLoss(torch.nn.Module):
             num_boxes=sum(len(t["labels"]) for t in in_targets),
         )
 
-        for box, label in zip(predicted_boxes[0], target_classes[0]):
-            if label == self.background_label:
-                continue
+        # for box, label in zip(predicted_boxes[0], target_classes[0]):
+        #     if label == self.background_label:
+        #         continue
 
-            iou, _ = box_iou(box.unsqueeze(0), predicted_boxes.squeeze(0))
-            idx = iou > 0.8
-            target_classes[idx] = label.item()
+        #     iou, _ = box_iou(box.unsqueeze(0), predicted_boxes.squeeze(0))
+        #     idx = iou > 0.75
+        #     target_classes[idx] = label.item()
 
         loss_class, loss_background = self.class_loss(in_preds, target_classes)
 

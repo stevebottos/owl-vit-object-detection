@@ -31,7 +31,7 @@ class PatchedOwlViTClassPredictionHead(nn.Module):
         )
 
         pred_sims = image_class_embeds @ query_embeds.transpose(1, 2)
-        return None, torch.clamp(pred_sims, 0, 1)
+        return None, torch.abs(pred_sims)
 
 
 class OwlViT(torch.nn.Module):
@@ -125,8 +125,6 @@ class PostProcess:
         pred_boxes = all_pred_boxes.squeeze(0)
         pred_classes = pred_classes.squeeze(0)
 
-        # np.savetxt("x.txt", pred_classes.tolist(), fmt="%.2f")
-
         top = torch.max(pred_classes, dim=1)
         scores = top.values
         classes = top.indices
@@ -164,8 +162,8 @@ def load_model(labelmap, device):
 
     for name, parameter in patched_model.named_parameters():
         if (
-            # "layers.11" in name
-            "box" in name
+            "layers.11" in name
+            or ("box" in name)
             or ("post_layernorm" in name)
             or ("class_predictor" in name)
             or ("queries" in name)
