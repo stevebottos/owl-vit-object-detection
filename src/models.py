@@ -19,6 +19,7 @@ class PatchedOwlViTClassPredictionHead(nn.Module):
         self.query_dim = original_cls_head.query_dim
 
         self.dense0 = original_cls_head.dense0
+        self.pool = torch.nn.MaxPool1d(kernel_size=3, stride=3)
 
     def forward(self, image_embeds, query_embeds):
         image_class_embeds = self.dense0(image_embeds)
@@ -32,6 +33,8 @@ class PatchedOwlViTClassPredictionHead(nn.Module):
         )
 
         pred_sims = image_class_embeds @ query_embeds.transpose(1, 2)
+        pred_sims = self.pool(pred_sims)
+
         return None, pred_sims
 
 
@@ -55,11 +58,7 @@ class OwlViT(torch.nn.Module):
         self.compute_box_bias = pretrained_model.compute_box_bias
         self.sigmoid = pretrained_model.sigmoid
 
-        self.queries = [
-            torch.nn.Parameter(query_bank),
-            torch.nn.Parameter(query_bank),
-            torch.nn.Parameter(query_bank),
-        ]
+        self.queries = torch.nn.Parameter(query_bank)
 
     # Copied from transformers.models.clip.modeling_owlvit.OwlViTForObjectDetection.box_predictor
     # Removed some comments and docstring to clear up clutter for now
@@ -153,9 +152,15 @@ def load_model(labelmap, device):
     _model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
     _processor = AutoProcessor.from_pretrained("google/owlvit-base-patch32")
 
+    to_encode = []
+    for label in labelmap.values():
+        to_encode.append(label)
+        to_encode.append("a photo of " + label)
+        to_encode.append("a " + label + " in an environment")
+
     print("Initializing priors from labels...")
     inputs = _processor(
-        text=[list(labelmap.values())],
+        text=[to_encode],
         images=Image.new("RGB", (224, 224)),
         return_tensors="pt",
     )
