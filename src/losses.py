@@ -18,7 +18,7 @@ class PushPullLoss(torch.nn.Module):
         Custom loss that works off of similarities
         """
 
-        src_logits = outputs["pred_logits"]
+        src_logits = torch.abs(outputs["pred_logits"])
         src_logits = src_logits.transpose(1, 2)
         target_classes.squeeze_(0)
         src_logits.squeeze_(0)
