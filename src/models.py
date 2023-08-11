@@ -8,6 +8,7 @@ from torch.nn.functional import softmax
 from torchvision.ops import nms, batched_nms
 from transformers import AutoProcessor, OwlViTForObjectDetection
 from transformers.image_transforms import center_to_corners_format
+import random
 
 
 # Monkey patched for no in-place ops
@@ -54,7 +55,11 @@ class OwlViT(torch.nn.Module):
         self.compute_box_bias = pretrained_model.compute_box_bias
         self.sigmoid = pretrained_model.sigmoid
 
-        self.queries = torch.nn.Parameter(query_bank, requires_grad=True)
+        self.queries = [
+            torch.nn.Parameter(query_bank),
+            torch.nn.Parameter(query_bank),
+            torch.nn.Parameter(query_bank),
+        ]
 
     # Copied from transformers.models.clip.modeling_owlvit.OwlViTForObjectDetection.box_predictor
     # Removed some comments and docstring to clear up clutter for now
@@ -161,13 +166,14 @@ def load_model(labelmap, device):
     patched_model = OwlViT(pretrained_model=_model, query_bank=queries)
 
     for name, parameter in patched_model.named_parameters():
-        if (
-            "layers.11" in name
-            or ("box" in name)
-            or ("post_layernorm" in name)
-            or ("class_predictor" in name)
-            or ("queries" in name)
-        ):
+        conditions = [
+            "layers.11" in name,
+            "box" in name,
+            "post_layernorm" in name,
+            "class_predictor" in name,
+            "queries" in name,
+        ]
+        if any(conditions):
             continue
 
         parameter.requires_grad = False
