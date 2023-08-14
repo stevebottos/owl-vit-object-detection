@@ -21,6 +21,10 @@ def get_images_dir():
         return data["images_path"]
 
 
+def collate_fn(batch):
+    return [b for b in batch]
+
+
 class OwlDataset(Dataset):
     def __init__(self, image_processor, annotations_file):
         self.images_dir = get_images_dir()
@@ -70,7 +74,12 @@ class OwlDataset(Dataset):
             "pixel_values"
         ].squeeze(0)
 
-        return image, torch.tensor(labels), torch.tensor(boxes), metadata
+        return {
+            "image": image,
+            "labels": torch.tensor(labels),
+            "boxes": torch.tensor(boxes),
+            "metadata": metadata,
+        }
 
 
 def get_dataloaders(
@@ -99,10 +108,18 @@ def get_dataloaders(
 
     train_labelcounts = {}
     train_dataloader = DataLoader(
-        train_dataset, batch_size=1, shuffle=True, num_workers=4
+        train_dataset,
+        batch_size=4,
+        shuffle=True,
+        num_workers=4,
+        collate_fn=collate_fn,
     )
     test_dataloader = DataLoader(
-        test_dataset, batch_size=1, shuffle=False, num_workers=4
+        test_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=4,
+        collate_fn=collate_fn,
     )
 
     return train_dataloader, test_dataloader, scales, labelmap

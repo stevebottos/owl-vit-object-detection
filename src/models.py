@@ -12,30 +12,30 @@ import random
 
 
 # Monkey patched for no in-place ops
-class PatchedOwlViTClassPredictionHead(nn.Module):
-    def __init__(self, original_cls_head):
-        super().__init__()
+# class PatchedOwlViTClassPredictionHead(nn.Module):
+#     def __init__(self, original_cls_head):
+#         super().__init__()
 
-        self.query_dim = original_cls_head.query_dim
+#         self.query_dim = original_cls_head.query_dim
 
-        self.dense0 = original_cls_head.dense0
-        self.pool = torch.nn.MaxPool1d(kernel_size=3, stride=3)
+#         self.dense0 = original_cls_head.dense0
+#         self.pool = torch.nn.MaxPool1d(kernel_size=3, stride=3)
 
-    def forward(self, image_embeds, query_embeds):
-        image_class_embeds = self.dense0(image_embeds)
+#     def forward(self, image_embeds, query_embeds):
+#         image_class_embeds = self.dense0(image_embeds)
 
-        # Normalize image and text features
-        image_class_embeds = image_class_embeds / (
-            torch.linalg.norm(image_class_embeds, dim=-1, keepdim=True) + 1e-6
-        )
-        query_embeds = (
-            query_embeds / torch.linalg.norm(query_embeds, dim=-1, keepdim=True) + 1e-6
-        )
+#         # Normalize image and text features
+#         image_class_embeds = image_class_embeds / (
+#             torch.linalg.norm(image_class_embeds, dim=-1, keepdim=True) + 1e-6
+#         )
+#         query_embeds = (
+#             query_embeds / torch.linalg.norm(query_embeds, dim=-1, keepdim=True) + 1e-6
+#         )
 
-        pred_sims = image_class_embeds @ query_embeds.transpose(1, 2)
-        pred_sims = self.pool(pred_sims)
+#         pred_sims = image_class_embeds @ query_embeds.transpose(1, 2)
+#         pred_sims = self.pool(pred_sims)
 
-        return None, pred_sims
+#         return None, pred_sims
 
 
 class OwlViT(torch.nn.Module):
@@ -50,15 +50,26 @@ class OwlViT(torch.nn.Module):
 
         # Take the pretrained components that are useful to us
         self.backbone = pretrained_model.owlvit.vision_model
-        self.post_post_layernorm = pretrained_model.layer_norm
-        self.class_predictor = PatchedOwlViTClassPredictionHead(
-            pretrained_model.class_head
-        )
+        self.post_layernorm2 = pretrained_model.layer_norm
         self.box_head = pretrained_model.box_head
         self.compute_box_bias = pretrained_model.compute_box_bias
-        self.sigmoid = pretrained_model.sigmoid
+        self.sigmoid = torch.nn.Sigmoid()
 
+        # This is our text section
+        self.text_layernorm = torch.nn.LayerNorm(512)
         self.queries = torch.nn.Parameter(query_bank)
+
+        # This is our image section
+        self.image_layernorm = torch.nn.LayerNorm(512)
+        self.class_linear_proj = torch.nn.Sequential(
+            torch.nn.Linear(768, 768),
+            torch.nn.Tanh(),
+            torch.nn.Linear(768, 768),
+            torch.nn.Tanh(),
+            torch.nn.Linear(768, 768),
+            torch.nn.Tanh(),
+            torch.nn.Linear(768, 512),
+        )
 
     # Copied from transformers.models.clip.modeling_owlvit.OwlViTForObjectDetection.box_predictor
     # Removed some comments and docstring to clear up clutter for now
@@ -77,13 +88,17 @@ class OwlViT(torch.nn.Module):
     def image_embedder(self, pixel_values):
         vision_outputs = self.backbone(pixel_values=pixel_values)
         last_hidden_state = vision_outputs.last_hidden_state
+
+        # Layernorm before melding in the class token
         image_embeds = self.backbone.post_layernorm(last_hidden_state)
 
+        # Add the class token in
         new_size = tuple(np.array(image_embeds.shape) - np.array((0, 1, 0)))
         class_token_out = torch.broadcast_to(image_embeds[:, :1, :], new_size)
-
         image_embeds = image_embeds[:, 1:, :] * class_token_out
-        image_embeds = self.post_post_layernorm(image_embeds)
+
+        # Layernorm after class token is mixed in
+        image_embeds = self.post_layernorm2(image_embeds)
 
         new_size = (
             image_embeds.shape[0],
@@ -91,32 +106,26 @@ class OwlViT(torch.nn.Module):
             int(np.sqrt(image_embeds.shape[1])),
             image_embeds.shape[-1],
         )
-        image_embeds = image_embeds.reshape(new_size)
 
-        return image_embeds
+        return image_embeds, image_embeds.reshape(new_size)
 
     def forward(
         self,
         image: torch.Tensor,
     ):
         # Same naming convention as image_guided_detection
-        feature_map = self.image_embedder(image)
-        new_size = (
-            feature_map.shape[0],
-            feature_map.shape[1] * feature_map.shape[2],
-            feature_map.shape[3],
-        )
-
-        image_feats = torch.reshape(feature_map, new_size)
+        image_embeds, image_embeds_as_feature_map = self.image_embedder(image)
 
         # Box predictions
-        pred_boxes = self.box_predictor(image_feats, feature_map)
-
-        pred_class_logits, pred_class_sims = self.class_predictor(
-            image_feats, self.queries
+        pred_boxes = self.box_predictor(
+            image_embeds,
+            image_embeds_as_feature_map,  # Not actually used for anything except its shape
         )
 
-        return (pred_boxes, pred_class_logits, pred_class_sims, None)
+        image_embeddings = self.image_layernorm(self.class_linear_proj(image_embeds))
+        text_embeddings = self.text_layernorm(self.queries)
+
+        return pred_boxes, image_embeddings, text_embeddings
 
 
 class PostProcess:
@@ -124,10 +133,22 @@ class PostProcess:
         self.confidence_threshold = confidence_threshold
         self.iou_threshold = iou_threshold
 
-    def __call__(self, all_pred_boxes, pred_classes):
+    def __call__(self, all_pred_boxes, image_embeddings, text_embeddings):
         # Just support batch size of one for now
         pred_boxes = all_pred_boxes.squeeze(0)
-        pred_classes = pred_classes.squeeze(0)
+        image_embeddings.squeeze_(0)
+        text_embeddings.squeeze_(0)
+
+        ie = (
+            image_embeddings / torch.linalg.norm(image_embeddings, dim=-1, keepdim=True)
+            + 1e-6
+        )
+
+        te = (
+            text_embeddings / torch.linalg.norm(text_embeddings, dim=-1, keepdim=True)
+            + 1e-6
+        )
+        pred_classes = ie @ te.T
 
         top = torch.max(pred_classes, dim=1)
         scores = top.values
@@ -152,21 +173,18 @@ def load_model(labelmap, device):
     _model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
     _processor = AutoProcessor.from_pretrained("google/owlvit-base-patch32")
 
-    to_encode = []
-    for label in labelmap.values():
-        to_encode.append(label)
-        to_encode.append("a photo of " + label)
-        to_encode.append("a " + label + " in an environment")
-
     print("Initializing priors from labels...")
+    labels = list(labelmap.values())
+    labels.append("background")
     inputs = _processor(
-        text=[to_encode],
+        text=[labels],
         images=Image.new("RGB", (224, 224)),
         return_tensors="pt",
     )
 
     with torch.no_grad():
         queries = _model(**inputs).text_embeds
+    queries = torch.randn(queries.shape)
 
     patched_model = OwlViT(pretrained_model=_model, query_bank=queries)
 
