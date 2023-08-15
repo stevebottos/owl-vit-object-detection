@@ -55,7 +55,6 @@ if __name__ == "__main__":
     )
 
     model.train()
-    import numpy as np
 
     classMAPs = {v: [] for v in list(labelmap.values())}
     for epoch in range(training_cfg["n_epochs"]):
@@ -94,14 +93,14 @@ if __name__ == "__main__":
                 + losses["loss_bbox"]
                 + losses["loss_giou"]
             )
-            print(loss.item())
             loss.backward()
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), 5)
             optimizer.step()
             general_loss.update(losses)
+
         train_metrics = general_loss.get_values()
         print(train_metrics)
         general_loss.reset()
+        torch.save(model.state_dict(), f"epochs/{epoch}.pt")
 
         # Eval loop
         model.eval()

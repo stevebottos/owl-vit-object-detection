@@ -91,7 +91,6 @@ class PushPullLoss(torch.nn.Module):
             text_embeddings.squeeze_(0)
             image_embeddings.squeeze_(0)
             target_classes.squeeze_(0)
-
             for image_embedding, label in zip(image_embeddings, target_classes):
                 if label == self.background_label:
                     continue
@@ -103,7 +102,8 @@ class PushPullLoss(torch.nn.Module):
             _target_classes, dtype=torch.float, device="cuda"
         ).unsqueeze(1)
         targets = -torch.clamp(torch.cdist(labels, labels), 0, 1) + 1
-
+        print(targets)
+        exit()
         # Class loss from here down
         image_embeddings = torch.stack(_image_embeddings)
         image_embeddings_norm = torch.nn.functional.normalize(
@@ -119,10 +119,11 @@ class PushPullLoss(torch.nn.Module):
         sims[targets == 0.0] = sims[targets == 0.0].pow(1 / self.gain)
         loss = F.binary_cross_entropy(sims, targets, reduction="none")
         loss = (torch.pow(1 - torch.exp(-loss), 2) * loss).sum()
+
         losses = {
-            "loss_ce": loss / batch_size,
-            "loss_bg": loss / batch_size,
+            "loss_ce": loss / (batch_size**2),
+            "loss_bg": loss / (batch_size**2),
             "loss_bbox": loss_bbox / batch_size,
             "loss_giou": loss_giou / batch_size,
         }
-        return losses, image_embeddings, target_classes
+        return losses, image_embeddings, labels
