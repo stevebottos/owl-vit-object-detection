@@ -51,7 +51,6 @@ if __name__ == "__main__":
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(training_cfg["learning_rate"]),
-        weight_decay=training_cfg["weight_decay"],
     )
 
     model.train()

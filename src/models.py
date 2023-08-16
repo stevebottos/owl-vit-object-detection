@@ -45,7 +45,7 @@ class OwlViT(torch.nn.Module):
     classifier to filter noise.
     """
 
-    def __init__(self, pretrained_model, query_bank):
+    def __init__(self, pretrained_model):
         super().__init__()
 
         # Take the pretrained components that are useful to us
@@ -57,7 +57,6 @@ class OwlViT(torch.nn.Module):
 
         # This is our text section
         self.text_layernorm = torch.nn.LayerNorm(512)
-        self.queries = torch.nn.Parameter(query_bank)
 
         # This is our image section
         self.image_layernorm = torch.nn.LayerNorm(512)
@@ -68,7 +67,7 @@ class OwlViT(torch.nn.Module):
             torch.nn.Tanh(),
             torch.nn.Linear(768, 768),
             torch.nn.Tanh(),
-            torch.nn.Linear(768, 512),
+            torch.nn.Linear(768, 80),
         )
 
     # Copied from transformers.models.clip.modeling_owlvit.OwlViTForObjectDetection.box_predictor
@@ -122,10 +121,9 @@ class OwlViT(torch.nn.Module):
             image_embeds_as_feature_map,  # Not actually used for anything except its shape
         )
 
-        image_embeddings = self.image_layernorm(self.class_linear_proj(image_embeds))
-        text_embeddings = self.text_layernorm(self.queries)
+        image_embeddings = self.class_linear_proj(image_embeds)
 
-        return pred_boxes, image_embeddings, text_embeddings
+        return pred_boxes, image_embeddings, None
 
 
 class PostProcess:
@@ -168,33 +166,16 @@ class PostProcess:
 
 
 def load_model(labelmap, device):
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
     _model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
-    _processor = AutoProcessor.from_pretrained("google/owlvit-base-patch32")
-
-    print("Initializing priors from labels...")
-    labels = list(labelmap.values())
-    labels.append("background")
-    inputs = _processor(
-        text=[labels],
-        images=Image.new("RGB", (224, 224)),
-        return_tensors="pt",
-    )
-
-    with torch.no_grad():
-        queries = _model(**inputs).text_embeds
-    queries = torch.randn(queries.shape)
-
-    patched_model = OwlViT(pretrained_model=_model, query_bank=queries)
+    patched_model = OwlViT(pretrained_model=_model)
 
     for name, parameter in patched_model.named_parameters():
         conditions = [
             "layers.11" in name,
             "box" in name,
             "post_layernorm" in name,
-            "class_predictor" in name,
-            "queries" in name,
+            "class_linear_proj" in name,
+            True,
         ]
         if any(conditions):
             continue
@@ -206,4 +187,5 @@ def load_model(labelmap, device):
         if parameter.requires_grad:
             print(f"  {name}")
     print()
+    # patched_model.load_state_dict(torch.load("19.pt"))
     return patched_model.to(device)

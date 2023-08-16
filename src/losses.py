@@ -21,8 +21,7 @@ class PushPullLoss(torch.nn.Module):
         super().__init__()
         self.matcher = HungarianMatcher(n_classes)
         self.background_label = n_classes
-        self.temperature = 0.1
-        self.gain = 100
+        self.margin = 0.0
         self.device = device
 
     def loss_boxes(self, outputs, targets, indices, idx, num_boxes):
@@ -46,7 +45,10 @@ class PushPullLoss(torch.nn.Module):
         loss_bbox = torch.tensor(0.0, device=self.device)
         loss_giou = torch.tensor(0.0, device=self.device)
         _image_embeddings = []
+        _target_embeddings = []
         _target_classes = []
+
+        one_hots = torch.eye(self.background_label).float().cuda()
         for inp in inputs:
             (
                 image_embeddings,
@@ -82,48 +84,57 @@ class PushPullLoss(torch.nn.Module):
             for box, label in zip(predicted_boxes[0], target_classes[0]):
                 if label == self.background_label:
                     continue
-
                 iou, _ = box_iou(box.unsqueeze(0), predicted_boxes.squeeze(0))
                 idx = iou > 0.85
                 target_classes[idx] = label.item()
 
             # CLIP-Style contrastive loss
-            text_embeddings.squeeze_(0)
-            image_embeddings.squeeze_(0)
-            target_classes.squeeze_(0)
+            image_embeddings = image_embeddings.squeeze(0)
+            target_classes = target_classes.squeeze(0)
             for image_embedding, label in zip(image_embeddings, target_classes):
                 if label == self.background_label:
                     continue
                 _image_embeddings.append(image_embedding)
                 _target_classes.append(label)
+                _target_embeddings.append(one_hots[label])
 
-        # Class loss
-        labels = torch.tensor(
-            _target_classes, dtype=torch.float, device="cuda"
-        ).unsqueeze(1)
-        targets = -torch.clamp(torch.cdist(labels, labels), 0, 1) + 1
-        print(targets)
-        exit()
-        # Class loss from here down
-        image_embeddings = torch.stack(_image_embeddings)
-        image_embeddings_norm = torch.nn.functional.normalize(
-            image_embeddings, p=2, dim=-1
-        )
+        if not len(_target_classes):
+            image_embeddings = torch.tensor([])
+            labels = torch.tensor([])
 
-        sims = torch.clamp(
-            image_embeddings_norm @ image_embeddings_norm.t(), 0, 1
-        )  # The job is to push apart the image sims
+            losses = {
+                "loss_ce": torch.tensor(0.0),
+                "loss_bg": torch.tensor(0.0),
+                "loss_bbox": loss_bbox / batch_size,
+                "loss_giou": loss_giou / batch_size,
+            }
 
-        # Modulate loss like this
-        sims[targets == 1.0] = sims[targets == 1.0].pow(self.gain)
-        sims[targets == 0.0] = sims[targets == 0.0].pow(1 / self.gain)
-        loss = F.binary_cross_entropy(sims, targets, reduction="none")
-        loss = (torch.pow(1 - torch.exp(-loss), 2) * loss).sum()
+        else:
+            # Class loss
+            labels = torch.tensor(
+                _target_classes, dtype=torch.float, device="cuda"
+            ).unsqueeze(1)
+            targets = -torch.clamp(torch.cdist(labels, labels), 0, 1) + 1
 
-        losses = {
-            "loss_ce": loss / (batch_size**2),
-            "loss_bg": loss / (batch_size**2),
-            "loss_bbox": loss_bbox / batch_size,
-            "loss_giou": loss_giou / batch_size,
-        }
+            # Class loss from here down
+            image_embeddings = torch.stack(_image_embeddings)
+            target_embeddings = torch.stack(_target_embeddings)
+            image_embeddings_norm = torch.nn.functional.normalize(
+                image_embeddings, p=2, dim=-1
+            )
+
+            sims = image_embeddings_norm @ target_embeddings.t()
+
+            loss_pos = (1 - sims[targets == 1.0]).sum()
+            loss_neg = torch.maximum(
+                torch.tensor(0.0), sims[targets == 0.0] - self.margin
+            ).sum()
+
+            loss = loss_pos + loss_neg
+            losses = {
+                "loss_ce": loss / (batch_size**2),
+                "loss_bg": loss / (batch_size**2),
+                "loss_bbox": loss_bbox / batch_size,
+                "loss_giou": loss_giou / batch_size,
+            }
         return losses, image_embeddings, labels
