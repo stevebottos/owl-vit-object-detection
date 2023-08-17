@@ -109,7 +109,7 @@ def get_dataloaders(
     train_labelcounts = {}
     train_dataloader = DataLoader(
         train_dataset,
-        batch_size=1,
+        batch_size=3,
         shuffle=True,
         num_workers=4,
         collate_fn=collate_fn,

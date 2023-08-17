@@ -80,9 +80,9 @@ if __name__ == "__main__":
                 boxes = coco_to_model_input(boxes, metadata)
 
                 # Predict
-                pred_boxes, image_embeddings, text_embeddings = model(image)
+                pred_boxes, image_embeddings, class_predictions = model(image)
                 outputs.append(
-                    [image_embeddings, text_embeddings, labels, pred_boxes, boxes]
+                    [image_embeddings, class_predictions, labels, pred_boxes, boxes]
                 )
             losses, _, _ = criterion(outputs)
 
@@ -97,13 +97,12 @@ if __name__ == "__main__":
             general_loss.update(losses)
 
         train_metrics = general_loss.get_values()
-        print(train_metrics)
         general_loss.reset()
         torch.save(model.state_dict(), f"epochs/{epoch}.pt")
 
         # Eval loop
         model.eval()
-        os.makedirs(f"val_logits/{epoch}")
+        os.makedirs(f"val_logits/{epoch}", exist_ok=True)
         with torch.no_grad():
             i = 0
             for i, examples in enumerate(tqdm(test_dataloader, ncols=60)):
@@ -119,57 +118,58 @@ if __name__ == "__main__":
                     boxes = coco_to_model_input(boxes, metadata).to(device)
 
                     # Get predictions and save output
-                    pred_boxes, image_embeddings, text_embeddings = model(image)
+                    pred_boxes, image_embeddings, class_predictions = model(image)
                     outputs.append(
-                        [image_embeddings, text_embeddings, labels, pred_boxes, boxes]
+                        [image_embeddings, class_predictions, labels, pred_boxes, boxes]
                     )
 
                 losses, image_embeddings, target_classes = criterion(outputs)
 
                 torch.save(image_embeddings, f"val_logits/{epoch}/{i}_image_embeds.pt")
                 torch.save(target_classes, f"val_logits/{epoch}/{i}_labels.pt")
-                continue
-                # pred_boxes, pred_classes, scores = postprocess(
-                #     pred_boxes, image_embeddings, text_embeddings
-                # )
+                torch.save(class_predictions, f"val_logits/{epoch}/{i}_class_preds.pt")
 
-                # # Use only the top 200 boxes to stay consistent with benchmarking
-                # top = torch.topk(scores, min(200, scores.size(-1)))
-                # scores = top.values
-                # inds = top.indices.squeeze(0)
+                pred_boxes, pred_classes, scores = postprocess(
+                    pred_boxes, class_predictions
+                )
 
-                # update_metrics(
-                #     metric,
-                #     metadata,
-                #     pred_boxes[:, inds],
-                #     pred_classes[:, inds],
-                #     scores,
-                #     boxes,
-                #     labels,
-                # )
+                # Use only the top 200 boxes to stay consistent with benchmarking
+                top = torch.topk(scores, min(200, scores.size(-1)))
+                scores = top.values
+                inds = top.indices.squeeze(0)
 
-                # if training_cfg["save_eval_images"]:
-                #     pred_classes_with_names = labels_to_classnames(
-                #         pred_classes, labelmap
-                #     )
-                #     pred_boxes = model_output_to_image(pred_boxes.cpu(), metadata)
-                #     image_with_boxes = BoxUtil.draw_box_on_image(
-                #         metadata["impath"].pop(),
-                #         pred_boxes,
-                #         pred_classes_with_names,
-                #     )
+                update_metrics(
+                    metric,
+                    metadata,
+                    pred_boxes[:, inds],
+                    pred_classes[:, inds],
+                    scores,
+                    boxes,
+                    labels,
+                )
 
-                #     write_png(image_with_boxes, f"debug/{epoch}/{i}.jpg")
+                if training_cfg["save_eval_images"]:
+                    pred_classes_with_names = labels_to_classnames(
+                        pred_classes, labelmap
+                    )
+                    pred_boxes = model_output_to_image(pred_boxes.cpu(), metadata)
+                    image_with_boxes = BoxUtil.draw_box_on_image(
+                        metadata["impath"].pop(),
+                        pred_boxes,
+                        pred_classes_with_names,
+                    )
 
-        # print("Computing metrics...")
-        # val_metrics = metric.compute()
-        # for i, p in enumerate(val_metrics["map_per_class"].tolist()):
-        #     label = labelmap[str(i)]
-        #     classMAPs[label].append(p)
+                    write_png(image_with_boxes, f"debug/{epoch}/{i}.jpg")
 
-        # with open("class_maps.json", "w") as f:
-        #     json.dump(classMAPs, f)
+        print("Computing metrics...")
+        val_metrics = metric.compute()
+        for i, p in enumerate(val_metrics["map_per_class"].tolist()):
+            label = labelmap[str(i)]
+            classMAPs[label].append(p)
 
-        # metric.reset()
-        # progress_summary.update(epoch, train_metrics, val_metrics)
-        # progress_summary.print()
+        with open("class_maps.json", "w") as f:
+            json.dump(classMAPs, f)
+
+        metric.reset()
+        progress_summary.update(epoch, train_metrics, val_metrics)
+        progress_summary.print()

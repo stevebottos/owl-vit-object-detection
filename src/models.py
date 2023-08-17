@@ -45,7 +45,7 @@ class OwlViT(torch.nn.Module):
     classifier to filter noise.
     """
 
-    def __init__(self, pretrained_model):
+    def __init__(self, pretrained_model, n_classes=81):
         super().__init__()
 
         # Take the pretrained components that are useful to us
@@ -67,7 +67,7 @@ class OwlViT(torch.nn.Module):
             torch.nn.Tanh(),
             torch.nn.Linear(768, 768),
             torch.nn.Tanh(),
-            torch.nn.Linear(768, 80),
+            torch.nn.Linear(768, n_classes),
         )
 
     # Copied from transformers.models.clip.modeling_owlvit.OwlViTForObjectDetection.box_predictor
@@ -122,8 +122,7 @@ class OwlViT(torch.nn.Module):
         )
 
         image_embeddings = self.class_linear_proj(image_embeds)
-
-        return pred_boxes, image_embeddings, None
+        return pred_boxes, image_embeddings, image_embeddings
 
 
 class PostProcess:
@@ -131,28 +130,17 @@ class PostProcess:
         self.confidence_threshold = confidence_threshold
         self.iou_threshold = iou_threshold
 
-    def __call__(self, all_pred_boxes, image_embeddings, text_embeddings):
+    def __call__(self, all_pred_boxes, class_predictions):
         # Just support batch size of one for now
         pred_boxes = all_pred_boxes.squeeze(0)
-        image_embeddings.squeeze_(0)
-        text_embeddings.squeeze_(0)
-
-        ie = (
-            image_embeddings / torch.linalg.norm(image_embeddings, dim=-1, keepdim=True)
-            + 1e-6
-        )
-
-        te = (
-            text_embeddings / torch.linalg.norm(text_embeddings, dim=-1, keepdim=True)
-            + 1e-6
-        )
-        pred_classes = ie @ te.T
+        class_predictions.squeeze_(0)
+        pred_classes = torch.nn.functional.softmax(class_predictions, dim=-1)
 
         top = torch.max(pred_classes, dim=1)
         scores = top.values
         classes = top.indices
 
-        idx = scores > self.confidence_threshold
+        idx = (scores > self.confidence_threshold) & (classes != 80)
         scores = scores[idx]
         classes = classes[idx]
         pred_boxes = pred_boxes[idx]
@@ -166,16 +154,35 @@ class PostProcess:
 
 
 def load_model(labelmap, device):
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
     _model = OwlViTForObjectDetection.from_pretrained("google/owlvit-base-patch32")
+    _processor = AutoProcessor.from_pretrained("google/owlvit-base-patch32")
+
+    print("Initializing priors from labels...")
+    labels = list(labelmap.values())
+    labels.append("background")
+    inputs = _processor(
+        text=[labels],
+        images=Image.new("RGB", (224, 224)),
+        return_tensors="pt",
+    )
+
+    with torch.no_grad():
+        queries = _model(**inputs).text_embeds
+    queries = torch.randn(queries.shape)
+
     patched_model = OwlViT(pretrained_model=_model)
 
     for name, parameter in patched_model.named_parameters():
         conditions = [
+            "layers.9" in name,
+            "layers.10" in name,
             "layers.11" in name,
             "box" in name,
             "post_layernorm" in name,
             "class_linear_proj" in name,
-            True,
+            "classifier" in name,
         ]
         if any(conditions):
             continue
@@ -187,5 +194,6 @@ def load_model(labelmap, device):
         if parameter.requires_grad:
             print(f"  {name}")
     print()
-    # patched_model.load_state_dict(torch.load("19.pt"))
+
+    patched_model.load_state_dict(torch.load("epochs/34.pt"), strict=False)
     return patched_model.to(device)
