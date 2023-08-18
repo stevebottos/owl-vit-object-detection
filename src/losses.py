@@ -1,27 +1,24 @@
 import torch
-from torch import nn
-from scipy.optimize import linear_sum_assignment
-from torchvision.ops import box_area
-import numpy as np
-import torch.nn.functional as F
 from src.matcher import HungarianMatcher, box_iou, generalized_box_iou
 
-
-def cross_entropy(preds, targets, reduction="none"):
-    log_softmax = nn.LogSoftmax(dim=-1)
-    loss = (-targets * log_softmax(preds)).sum(1)
-    if reduction == "none":
-        return loss
-    elif reduction == "mean":
-        return loss.mean()
+# Hyperparams
 
 
 class PushPullLoss(torch.nn.Module):
-    def __init__(self, n_classes, device):
+    def __init__(self, n_classes, device, one_to_many_iou_threshold=0.75, margin=0.5):
         super().__init__()
-        self.matcher = HungarianMatcher(n_classes)
+
         self.background_label = n_classes
         self.device = device
+        self.one_to_many_iou_threshold = one_to_many_iou_threshold
+        self.margin = margin
+
+        scales = [1] + [4] * 79 + [0.1]
+        self.matcher = HungarianMatcher(n_classes)
+        self.goalposts = torch.eye(n_classes + 1, dtype=torch.float, device="cuda")
+        self.ce = torch.nn.CrossEntropyLoss(
+            reduction="none", weight=None  # torch.tensor(scales, device=device)
+        )
 
     def loss_boxes(self, outputs, targets, indices, idx, num_boxes):
         src_boxes = outputs["pred_boxes"][idx]
@@ -47,6 +44,8 @@ class PushPullLoss(torch.nn.Module):
 
         _image_embeddings = []
         _target_classes = []
+
+        _goalposts = []
         for inp in inputs:
             (
                 image_embeddings,
@@ -84,12 +83,10 @@ class PushPullLoss(torch.nn.Module):
                     continue
 
                 iou, _ = box_iou(box.unsqueeze(0), predicted_boxes.squeeze(0))
-                idx = iou > 0.85
+                idx = iou > self.one_to_many_iou_threshold
                 target_classes[idx] = label.item()
 
-            loss_ce_batch = torch.nn.functional.cross_entropy(
-                class_predictions.transpose(1, 2), target_classes, reduction="none"
-            )
+            loss_ce_batch = self.ce(class_predictions.transpose(1, 2), target_classes)
             loss_ce_batch = torch.pow(1 - torch.exp(-loss_ce_batch), 2) * loss_ce_batch
             loss_ce_batch[target_classes == 80] *= 0.1  # alpha
             loss_ce += (
@@ -105,8 +102,10 @@ class PushPullLoss(torch.nn.Module):
                 #     continue
                 _image_embeddings.append(image_embedding)
                 _target_classes.append(label)
+                _goalposts.append(self.goalposts[label])
 
         # Class loss
+        goalposts = torch.stack(_goalposts)
         labels = torch.tensor(
             _target_classes, dtype=torch.float, device="cuda"
         ).unsqueeze(1)
@@ -118,9 +117,11 @@ class PushPullLoss(torch.nn.Module):
             image_embeddings, p=2, dim=-1
         )
 
-        sims = image_embeddings_norm @ image_embeddings_norm.t()
+        sims = image_embeddings_norm @ goalposts.t()
         loss_pos = (1 - sims[targets == 1.0]).mean()
-        loss_neg = torch.maximum(torch.tensor(0.0), sims[targets == 0.0] - 0.25).mean()
+        loss_neg = torch.maximum(
+            torch.tensor(0.0), sims[targets == 0.0] - self.margin
+        ).mean()
 
         loss = loss_pos + loss_neg
         losses = {

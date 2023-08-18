@@ -48,13 +48,15 @@ if __name__ == "__main__":
 
     criterion = PushPullLoss(len(labelmap), device)
 
-    optimizer = torch.optim.AdamW(
+    optimizer = torch.optim.Adam(
         model.parameters(),
         lr=float(training_cfg["learning_rate"]),
     )
 
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer, step_size=5, gamma=0.25, verbose=True
+    )
     model.train()
-
     classMAPs = {v: [] for v in list(labelmap.values())}
     for epoch in range(training_cfg["n_epochs"]):
         if training_cfg["save_eval_images"]:
@@ -173,3 +175,4 @@ if __name__ == "__main__":
         metric.reset()
         progress_summary.update(epoch, train_metrics, val_metrics)
         progress_summary.print()
+        scheduler.step()

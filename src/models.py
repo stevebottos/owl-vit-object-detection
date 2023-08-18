@@ -4,47 +4,34 @@ import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image
-from torch.nn.functional import softmax
-from torchvision.ops import nms, batched_nms
+from torchvision.ops import batched_nms
 from transformers import AutoProcessor, OwlViTForObjectDetection
 from transformers.image_transforms import center_to_corners_format
-import random
 
 
-# Monkey patched for no in-place ops
-# class PatchedOwlViTClassPredictionHead(nn.Module):
-#     def __init__(self, original_cls_head):
-#         super().__init__()
+# From https://github.com/moein-shariatnia/OpenAI-CLIP/blob/master/modules.py
+# This is to map the high-dimensional image embedding to an n-dimensional
+# space for n-classes
+class ProjectionHead(nn.Module):
+    def __init__(self, embedding_dim, projection_dim, dropout=0.1):
+        super().__init__()
+        self.projection = nn.Linear(embedding_dim, projection_dim)
+        self.gelu = nn.GELU()
+        self.fc = nn.Linear(projection_dim, projection_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(projection_dim)
 
-#         self.query_dim = original_cls_head.query_dim
-
-#         self.dense0 = original_cls_head.dense0
-#         self.pool = torch.nn.MaxPool1d(kernel_size=3, stride=3)
-
-#     def forward(self, image_embeds, query_embeds):
-#         image_class_embeds = self.dense0(image_embeds)
-
-#         # Normalize image and text features
-#         image_class_embeds = image_class_embeds / (
-#             torch.linalg.norm(image_class_embeds, dim=-1, keepdim=True) + 1e-6
-#         )
-#         query_embeds = (
-#             query_embeds / torch.linalg.norm(query_embeds, dim=-1, keepdim=True) + 1e-6
-#         )
-
-#         pred_sims = image_class_embeds @ query_embeds.transpose(1, 2)
-#         pred_sims = self.pool(pred_sims)
-
-#         return None, pred_sims
+    def forward(self, x):
+        projected = self.projection(x)
+        x = self.gelu(projected)
+        x = self.fc(x)
+        x = self.dropout(x)
+        x = x + projected
+        x = self.layer_norm(x)
+        return x
 
 
 class OwlViT(torch.nn.Module):
-    """
-    We don't train this that's why it's not an nn.Module subclass.
-    We just use this to get to the point where we can use the
-    classifier to filter noise.
-    """
-
     def __init__(self, pretrained_model, n_classes=81):
         super().__init__()
 
@@ -55,20 +42,12 @@ class OwlViT(torch.nn.Module):
         self.compute_box_bias = pretrained_model.compute_box_bias
         self.sigmoid = torch.nn.Sigmoid()
 
-        # This is our text section
-        self.text_layernorm = torch.nn.LayerNorm(512)
-
-        # This is our image section
-        self.image_layernorm = torch.nn.LayerNorm(512)
-        self.class_linear_proj = torch.nn.Sequential(
-            torch.nn.Linear(768, 768),
-            torch.nn.Tanh(),
-            torch.nn.Linear(768, 768),
-            torch.nn.Tanh(),
-            torch.nn.Linear(768, 768),
-            torch.nn.Tanh(),
-            torch.nn.Linear(768, n_classes),
-        )
+        self.class_linear_proj = ProjectionHead(768, n_classes)
+        # self.classifier = torch.nn.Sequential(
+        #     torch.nn.Linear(n_classes, n_classes),
+        #     torch.nn.Tanh(),
+        #     torch.nn.Linear(n_classes, n_classes),
+        # )
 
     # Copied from transformers.models.clip.modeling_owlvit.OwlViTForObjectDetection.box_predictor
     # Removed some comments and docstring to clear up clutter for now
@@ -122,19 +101,32 @@ class OwlViT(torch.nn.Module):
         )
 
         image_embeddings = self.class_linear_proj(image_embeds)
+        # classifier_output = self.classifier(image_embeddings)
         return pred_boxes, image_embeddings, image_embeddings
 
 
 class PostProcess:
-    def __init__(self, confidence_threshold=0.75, iou_threshold=0.3):
+    def __init__(self, mode="cos", confidence_threshold=0.75, iou_threshold=0.3):
         self.confidence_threshold = confidence_threshold
         self.iou_threshold = iou_threshold
+        self.goalposts = torch.eye(81, dtype=torch.float, device="cuda")
+        self.mode = mode
 
     def __call__(self, all_pred_boxes, class_predictions):
         # Just support batch size of one for now
         pred_boxes = all_pred_boxes.squeeze(0)
         class_predictions.squeeze_(0)
-        pred_classes = torch.nn.functional.softmax(class_predictions, dim=-1)
+
+        if self.mode == "ce":
+            pred_classes = torch.nn.functional.softmax(class_predictions, dim=-1)
+        elif self.mode == "cos":
+            class_predictions = torch.nn.functional.normalize(
+                class_predictions, p=2, dim=-1
+            )
+            pred_classes = class_predictions @ self.goalposts
+        else:
+            # Default to cross entropy
+            pred_classes = torch.nn.functional.softmax(class_predictions, dim=-1)
 
         top = torch.max(pred_classes, dim=1)
         scores = top.values
@@ -176,13 +168,13 @@ def load_model(labelmap, device):
 
     for name, parameter in patched_model.named_parameters():
         conditions = [
-            "layers.9" in name,
-            "layers.10" in name,
-            "layers.11" in name,
+            # "layers.9" in name,
+            # "layers.10" in name,
+            # "layers.11" in name,
             "box" in name,
             "post_layernorm" in name,
             "class_linear_proj" in name,
-            "classifier" in name,
+            # "classifier" in name,
         ]
         if any(conditions):
             continue
@@ -195,5 +187,5 @@ def load_model(labelmap, device):
             print(f"  {name}")
     print()
 
-    patched_model.load_state_dict(torch.load("epochs/34.pt"), strict=False)
+    # patched_model.load_state_dict(torch.load("epochs/7.pt"), strict=False)
     return patched_model.to(device)
